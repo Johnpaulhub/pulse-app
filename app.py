@@ -144,7 +144,7 @@ BASE_TEMPLATE = """
         nav { background: rgba(11,14,20,.9); border-bottom: 1px solid var(--border); padding: 0 16px; display: flex; justify-content: space-between; align-items: center; position: fixed; top: 0; left: 0; right: 0; z-index: 100; height: 60px; backdrop-filter: blur(12px); }
         .logo { font-size: 1.35rem; font-weight: 800; color: var(--text); text-decoration: none; letter-spacing: -.5px; }
         .nav-links { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-        .nav-links a { color: var(--text-muted); text-decoration: none; font-weight: 500; font-size: .85rem; }
+        .nav-links a { color: var(--text-muted); text-decoration: none; font-weight: 500; font-size: .85rem; position: relative; }
         .nav-links a:hover { color: var(--primary); }
         .container { max-width: 600px; margin: 0 auto; padding: 0 12px; }
         .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 14px; padding: 18px; margin-bottom: 16px; position: relative; }
@@ -169,6 +169,11 @@ BASE_TEMPLATE = """
         .post-image:hover { opacity: .9; }
         .post-image.single { height: auto; max-height: 350px; grid-column: 1 / -1; }
         .quote-box { background: rgba(0,0,0,.25); border-left: 3px solid var(--primary); padding: 10px 12px; border-radius: 0 8px 8px 0; margin-bottom: 12px; font-size: .9rem; }
+        .poll-container { background: #090d16; border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+        .poll-option { display: block; width: 100%; text-align: left; background: var(--card-bg); border: 1px solid var(--border); padding: 8px 12px; border-radius: 8px; margin-top: 6px; color: var(--text); cursor: pointer; position: relative; overflow: hidden; font-size: .85rem; }
+        .poll-option:hover { border-color: var(--primary); }
+        .poll-bar { position: absolute; top: 0; left: 0; bottom: 0; background: rgba(59, 130, 246, 0.2); z-index: 1; pointer-events: none; }
+        .poll-text { position: relative; z-index: 2; display: flex; justify-content: space-between; }
         .post-actions { display: flex; gap: 10px; margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; font-size: .8rem; color: var(--text-muted); align-items: center; flex-wrap: wrap; }
         .linkish { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: .8rem; padding: 0; }
         .linkish:hover, .post-actions a:hover { color: var(--primary); }
@@ -177,6 +182,7 @@ BASE_TEMPLATE = """
         .badge { display: inline-block; font-size: .65rem; font-weight: 800; letter-spacing: .06em; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--warn); color: var(--warn); }
         .badge-sys { border-color: var(--primary); color: var(--primary); }
         .badge-dead { border-color: var(--danger); color: var(--danger); }
+        .badge-counter { background: var(--danger); color: white; border-radius: 50%; padding: 1px 5px; font-size: .6rem; position: absolute; top: -6px; right: -10px; font-weight: bold; display: none; }
         .feeds { display: flex; gap: 10px; flex-wrap: wrap; font-size: .85rem; }
         .feeds a { color: var(--text-muted); text-decoration: none; font-weight: 600; }
         .feeds a.on { color: var(--primary); }
@@ -201,8 +207,9 @@ BASE_TEMPLATE = """
             <a href="{{ url_for('explore') }}">Explore</a>
             <a href="{{ url_for('trending_page') }}">🔥 Trending</a>
             {% if session.get('user_id') %}
+                <a href="{{ url_for('bookmarks_page') }}">🔖 Bookmarks</a>
                 <a href="{{ url_for('messages') }}">Inbox</a>
-                <a href="{{ url_for('notifications') }}">Notifications</a>
+                <a href="{{ url_for('notifications') }}">Notifications<span id="notif-badge" class="badge-counter">0</span></a>
                 <a href="{{ url_for('profile', username=session.get('username')) }}">Profile</a>
                 <a href="{{ url_for('logout') }}" style="color:var(--danger)">Logout</a>
             {% else %}
@@ -234,6 +241,26 @@ BASE_TEMPLATE = """
         document.getElementById('lightbox-img').src = src;
         document.getElementById('lightbox').style.display = 'flex';
     }
+    {% if session.get('user_id') %}
+    socket.emit('join_notifications', {user_id: {{ session.get('user_id') }}});
+    socket.on('new_notification', function(data) {
+        const badge = document.getElementById('notif-badge');
+        if (badge) {
+            let count = parseInt(badge.textContent || '0') + 1;
+            badge.textContent = count;
+            badge.style.display = 'inline-block';
+        }
+    });
+    fetch('/notifications/json').then(r => r.json()).then(data => {
+        if (data.length > 0) {
+            const badge = document.getElementById('notif-badge');
+            if (badge) {
+                badge.textContent = data.length;
+                badge.style.display = 'inline-block';
+            }
+        }
+    });
+    {% endif %}
     </script>
 </body>
 </html>
@@ -277,12 +304,20 @@ INDEX_TEMPLATE = """
     <form method="POST" action="{{ url_for('create_post') }}" enctype="multipart/form-data">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <textarea name="content" rows="3" placeholder="Take a stance. Use #tags and @names." style="resize:none;background:transparent;border:none;font-size:1rem;color:var(--text);outline:none;"></textarea>
+        
+        <div id="poll-creator" style="display:none;margin-top:10px;border-top:1px dashed var(--border);padding-top:10px;">
+            <label style="font-size:.8rem;color:var(--warn);margin-bottom:4px;">Attach Poll Options</label>
+            <input type="text" name="poll_opt1" placeholder="Option 1" style="margin-bottom:6px;font-size:.85rem;padding:8px;">
+            <input type="text" name="poll_opt2" placeholder="Option 2" style="font-size:.85rem;padding:8px;">
+        </div>
+
         <div class="row" style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px;flex-wrap:wrap;">
             <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
                 <label style="margin:0;cursor:pointer;background:#090d16;border:1px solid var(--border);padding:6px 12px;border-radius:10px;font-size:.8rem;color:var(--text-muted);">
                     📷 Upload Images
-                    <input type="file" name="files" accept="image/*" multiple style="display:none;" onchange="this.parentElement.style.borderColor='var(--primary)';">
+                    <input type="file" name="files" accept="image/*" multiple style="display:none;">
                 </label>
+                <button type="button" class="btn btn-outline" style="padding:5px 10px;font-size:.75rem;" onclick="let el=document.getElementById('poll-creator');el.style.display=el.style.display=='none'?'block':'none';">📊 Add Poll</button>
                 <label style="margin:0;display:flex;gap:6px;align-items:center;color:var(--warn);font-size:.8rem;">
                     <input type="checkbox" name="is_stance" value="1" style="width:auto;"> Stance
                 </label>
@@ -304,11 +339,45 @@ INDEX_TEMPLATE = """
     </div>
 </div>
 
-{% for post in posts %}
-    {% include "post_card.html" %}
-{% else %}
-<p style="color:var(--text-muted);text-align:center;padding:40px 0;">The network is quiet. Take a stance.</p>
-{% endfor %}
+<div id="posts-container">
+    {% for post in posts %}
+        {% include "post_card.html" %}
+    {% else %}
+    <p style="color:var(--text-muted);text-align:center;padding:40px 0;">The network is quiet. Take a stance.</p>
+    {% endfor %}
+</div>
+
+<div id="load-more-trigger" style="text-align:center;padding:20px;">
+    <button id="load-more-btn" class="btn btn-outline" onclick="loadMorePosts()" style="font-size:.8rem;">Load More Older Posts</button>
+</div>
+
+<script>
+let page = 1;
+const feedType = "{{ feed_type }}";
+async function loadMorePosts() {
+    page++;
+    const btn = document.getElementById('load-more-btn');
+    btn.textContent = 'Loading...';
+    try {
+        const res = await fetch(`/feed/json?feed=${feedType}&page=${page}`);
+        const data = await res.json();
+        if (data.posts.length === 0) {
+            document.getElementById('load-more-trigger').innerHTML = '<p style="color:var(--text-muted);font-size:.8rem;">No more posts to load.</p>';
+            return;
+        }
+        const container = document.getElementById('posts-container');
+        for (const post of data.posts) {
+            // Render post card fragment dynamically via client template rendering or simple HTML injection
+            const div = document.createElement('div');
+            div.innerHTML = post.html_card;
+            container.appendChild(div.firstElementChild);
+        }
+        btn.textContent = 'Load More Older Posts';
+    } catch(err) {
+        btn.textContent = 'Error loading posts';
+    }
+}
+</script>
 {% endblock %}
 """
 
@@ -336,21 +405,45 @@ POST_CARD_TEMPLATE = """
         {% if post.quoted_post %}
         <div class="quote-box">
             <div style="font-weight:700;font-size:.8rem;margin-bottom:4px;color:var(--text-muted);">@{{ post.quoted_post.username }}</div>
-            <div>{{ post.quoted_post.content|pulse }}</div>
+            <div>{{ post.quoted_post.formatted_content }}</div>
         </div>
         {% endif %}
         <div class="post-content">{{ post.formatted_content }}</div>
-        {% if post.og_title %}
-        <div style="border:1px solid var(--border);border-radius:8px;background:#090d16;overflow:hidden;margin-bottom:12px;">
-            {% if post.og_image %}
-            <img src="{{ post.og_image }}" style="width:100%;height:140px;object-fit:cover;" alt="">
-            {% endif %}
-            <div style="padding:10px;">
-                <div style="font-weight:700;font-size:.85rem;margin-bottom:2px;">{{ post.og_title }}</div>
-                <div style="font-size:.75rem;color:var(--text-muted);">{{ post.og_description }}</div>
+        
+        {% if post.og_url %}
+        <a href="{{ post.og_url }}" target="_blank" style="text-decoration:none;color:inherit;">
+            <div style="border:1px solid var(--border);border-radius:8px;background:#090d16;overflow:hidden;margin-bottom:12px;display:flex;flex-direction:column;">
+                {% if post.og_image %}
+                <img src="{{ post.og_image }}" style="width:100%;height:150px;object-fit:cover;" alt="">
+                {% endif %}
+                <div style="padding:10px;">
+                    <div style="font-weight:700;font-size:.85rem;margin-bottom:2px;color:var(--text);">{{ post.og_title or post.og_url }}</div>
+                    <div style="font-size:.75rem;color:var(--text-muted);">{{ post.og_description or '' }}</div>
+                </div>
             </div>
+        </a>
+        {% endif %}
+
+        {% if post.poll %}
+        <div class="poll-container">
+            <div style="font-size:.8rem;font-weight:bold;margin-bottom:6px;color:var(--text-muted);">📊 Live Poll</div>
+            {% set total_votes = post.poll.options | sum(attribute='votes') %}
+            {% for opt in post.poll.options %}
+                {% set pct = (opt.votes / total_votes * 100) | round | int if total_votes > 0 else 0 %}
+                <form method="POST" action="{{ url_for('vote_poll', option_id=opt.id) }}" style="margin:0;">
+                    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                    <button type="submit" class="poll-option">
+                        <div class="poll-bar" style="width: {{ pct }}%;"></div>
+                        <div class="poll-text">
+                            <span>{{ opt.text }}</span>
+                            <span style="font-weight:bold;color:var(--primary);">{{ pct }}% ({{ opt.votes }})</span>
+                        </div>
+                    </button>
+                </form>
+            {% endfor %}
         </div>
         {% endif %}
+
         {% if post.image_filenames %}
             {% set imgs = post.image_filenames.split(',') %}
             <div class="image-grid">
@@ -434,6 +527,18 @@ POST_DETAIL_TEMPLATE = """
 </div>
 {% else %}
 <p style="color:var(--text-muted);text-align:center;padding:20px;font-size:.85rem;">No replies yet.</p>
+{% endfor %}
+{% endblock %}
+"""
+
+BOOKMARKS_TEMPLATE = """
+{% extends "base.html" %}
+{% block content %}
+<div style="font-weight:700;margin-bottom:12px;font-size:1rem;color:var(--text-muted);">🔖 Your Saved Collections</div>
+{% for post in posts %}
+    {% include "post_card.html" %}
+{% else %}
+<p style="color:var(--text-muted);text-align:center;padding:40px;">No saved bookmarks yet.</p>
 {% endfor %}
 {% endblock %}
 """
@@ -722,6 +827,7 @@ app.jinja_loader = DictLoader({
     "index.html": INDEX_TEMPLATE,
     "post_card.html": POST_CARD_TEMPLATE,
     "post_detail.html": POST_DETAIL_TEMPLATE,
+    "bookmarks.html": BOOKMARKS_TEMPLATE,
     "explore.html": EXPLORE_TEMPLATE,
     "trending.html": TRENDING_TEMPLATE,
     "login.html": LOGIN_TEMPLATE,
@@ -776,6 +882,25 @@ def init_db():
             image_filenames TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users (id)
+        );
+        CREATE TABLE IF NOT EXISTS polls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_id INTEGER NOT NULL,
+            FOREIGN KEY (post_id) REFERENCES posts (id)
+        );
+        CREATE TABLE IF NOT EXISTS poll_options (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            poll_id INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            votes INTEGER DEFAULT 0,
+            FOREIGN KEY (poll_id) REFERENCES polls (id)
+        );
+        CREATE TABLE IF NOT EXISTS poll_votes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            poll_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            option_id INTEGER NOT NULL,
+            UNIQUE(poll_id, user_id)
         );
         CREATE TABLE IF NOT EXISTS stories (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -846,6 +971,7 @@ def init_db():
         ("og_title", "TEXT"),
         ("og_description", "TEXT"),
         ("og_image", "TEXT"),
+        ("og_url", "TEXT"),
         ("status", "TEXT DEFAULT 'published'"),
         ("scheduled_for", "TIMESTAMP"),
     ]:
@@ -899,13 +1025,13 @@ def fetch_og_data(url):
         response = requests.get(url, headers=headers, timeout=3)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            title = soup.find('meta', property='og:title')
-            desc = soup.find('meta', property='og:description')
+            title = soup.find('meta', property='og:title') or soup.find('title')
+            desc = soup.find('meta', property='og:description') or soup.find('meta', attrs={'name': 'description'})
             img = soup.find('meta', property='og:image')
             return {
-                'title': title['content'] if title else None,
-                'description': desc['content'] if desc else None,
-                'image': img['content'] if img else None
+                'title': title.get('content') if title and title.has_attr('content') else (title.text if title else None),
+                'description': desc.get('content') if desc and desc.has_attr('content') else None,
+                'image': img.get('content') if img and img.has_attr('image') or (img and img.has_attr('content')) else None
             }
     except Exception:
         pass
@@ -914,14 +1040,51 @@ def fetch_og_data(url):
 def hydrate(rows):
     db = get_db()
     posts = []
+    
+    quote_ids = [dict(row).get("quote_of_id") for row in rows if dict(row).get("quote_of_id")]
+    post_ids = [dict(row).get("id") for row in rows]
+    quoted_posts_map = {}
+    polls_map = {}
+
+    if quote_ids:
+        q_sql = f"""
+            SELECT posts.*, users.username, users.avatar,
+                   (SELECT COUNT(*) FROM reactions WHERE reactions.post_id = posts.id AND kind = 'resonate') AS resonates,
+                   (SELECT COUNT(*) FROM reactions WHERE reactions.post_id = posts.id AND kind = 'break') AS breaks,
+                   (SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id) AS comments_count
+            FROM posts
+            JOIN users ON posts.user_id = users.id
+            WHERE posts.id IN ({','.join('?' * len(quote_ids))})
+        """
+        q_rows = db.execute(q_sql, quote_ids).fetchall()
+        quoted_posts_map = {p["id"]: dict(p) for p in q_rows}
+
+    if post_ids:
+        p_sql = f"""
+            SELECT polls.id as poll_id, polls.post_id, poll_options.id as option_id, poll_options.text, poll_options.votes
+            FROM polls
+            JOIN poll_options ON polls.id = poll_options.poll_id
+            WHERE polls.post_id IN ({','.join('?' * len(post_ids))})
+        """
+        poll_rows = db.execute(p_sql, post_ids).fetchall()
+        temp_polls = defaultdict(lambda: {"id": None, "options": []})
+        for pr in poll_rows:
+            temp_polls[pr["post_id"]]["id"] = pr["poll_id"]
+            temp_polls[pr["post_id"]]["options"].append({"id": pr["option_id"], "text": pr["text"], "votes": pr["votes"]})
+        polls_map = dict(temp_polls)
+
     for row in rows:
         post = dict(row)
         post["formatted_content"] = format_pulse(post["content"])
         post["score"] = pulse_score(post.get("resonates"), post.get("comments_count"), post.get("breaks"))
-        if post.get("quote_of_id"):
-            q_row = db.execute(f"{POST_SELECT} WHERE posts.id = ?", (post["quote_of_id"],)).fetchone()
-            if q_row:
-                post["quoted_post"] = dict(q_row)
+        
+        if post.get("quote_of_id") in quoted_posts_map:
+            post["quoted_post"] = quoted_posts_map[post["quote_of_id"]]
+            post["quoted_post"]["formatted_content"] = format_pulse(post["quoted_post"]["content"])
+
+        if post["id"] in polls_map:
+            post["poll"] = polls_map[post["id"]]
+            
         posts.append(post)
     return posts
 
@@ -969,10 +1132,54 @@ def index():
     
     where += " AND (posts.status = 'published' OR (posts.status = 'scheduled' AND posts.scheduled_for <= datetime('now')))"
     
-    rows = db.execute(f"{POST_SELECT} WHERE {where} ORDER BY posts.created_at DESC LIMIT 50", tuple(params)).fetchall()
+    rows = db.execute(f"{POST_SELECT} WHERE {where} ORDER BY posts.created_at DESC LIMIT 10", tuple(params)).fetchall()
     stories = db.execute("SELECT stories.*, users.username FROM stories JOIN users ON stories.user_id = users.id ORDER BY stories.created_at DESC").fetchall()
     
     return render_template("index.html", posts=hydrate(rows), stories=stories, feed_type=feed_type)
+
+@app.route("/feed/json")
+def feed_json():
+    feed_type = request.args.get("feed", "global")
+    page = int(request.args.get("page", 1))
+    limit = 10
+    offset = (page - 1) * limit
+    db = get_db()
+
+    where = "1=1"
+    params = []
+    if "user_id" in session:
+        where += " AND posts.user_id NOT IN (SELECT blocked_id FROM blocks WHERE user_id = ?)"
+        params.append(session["user_id"])
+        if feed_type == "following":
+            where += " AND (posts.user_id = ? OR posts.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?))"
+            params.extend([session["user_id"], session["user_id"]])
+
+    if feed_type == "clash":
+        where += " AND (posts.break_of_id IS NOT NULL OR posts.is_stance = 1)"
+    
+    where += " AND (posts.status = 'published' OR (posts.status = 'scheduled' AND posts.scheduled_for <= datetime('now')))"
+    params.extend([limit, offset])
+
+    rows = db.execute(f"{POST_SELECT} WHERE {where} ORDER BY posts.created_at DESC LIMIT ? OFFSET ?", tuple(params)).fetchall()
+    hydrated = hydrate(rows)
+    
+    out = []
+    for p in hydrated:
+        card_html = render_template("post_card.html", post=p)
+        out.append({"html_card": card_html})
+    return jsonify({"posts": out})
+
+@app.route("/bookmarks")
+@login_required
+def bookmarks_page():
+    db = get_db()
+    rows = db.execute(f"""
+        {POST_SELECT} 
+        JOIN bookmarks ON posts.id = bookmarks.post_id 
+        WHERE bookmarks.user_id = ? 
+        ORDER BY bookmarks.id DESC
+    """, (session["user_id"],)).fetchall()
+    return render_template("bookmarks.html", posts=hydrate(rows))
 
 @app.route("/tag/<tagname>")
 def tag_feed(tagname):
@@ -1003,6 +1210,11 @@ def post_detail(post_id):
         if content:
             db.execute("INSERT INTO comments (post_id, user_id, content) VALUES (?, ?, ?)", (post_id, session["user_id"], content))
             db.commit()
+            post_owner = db.execute("SELECT user_id FROM posts WHERE id = ?", (post_id,)).fetchone()
+            if post_owner and post_owner["user_id"] != session["user_id"]:
+                db.execute("INSERT INTO notifications (user_id, message) VALUES (?, ?)", (post_owner["user_id"], f"@{session['username']} replied to your post."))
+                db.commit()
+                socketio.emit('new_notification', {'message': 'New reply'}, room=f"user_{post_owner['user_id']}")
         return redirect(url_for("post_detail", post_id=post_id))
     row = db.execute(f"{POST_SELECT} WHERE posts.id = ?", (post_id,)).fetchone()
     if not row:
@@ -1036,9 +1248,10 @@ def create_post():
         flash("Posts cannot be empty.")
         return redirect(url_for("index"))
         
-    og_title, og_description, og_image = None, None, None
+    og_title, og_description, og_image, og_url = None, None, None, None
     for word in content.split():
         if word.startswith("http://") or word.startswith("https://"):
+            og_url = word
             og_data = fetch_og_data(word)
             if og_data:
                 og_title = og_data["title"]
@@ -1047,12 +1260,43 @@ def create_post():
             break
 
     db = get_db()
-    db.execute(
-        "INSERT INTO posts (user_id, content, image_filenames, is_stance, status, scheduled_for, og_title, og_description, og_image) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (session["user_id"], content, filenames_str, is_stance, status, scheduled_for, og_title, og_description, og_image)
+    cursor = db.cursor()
+    cursor.execute(
+        "INSERT INTO posts (user_id, content, image_filenames, is_stance, status, scheduled_for, og_title, og_description, og_image, og_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (session["user_id"], content, filenames_str, is_stance, status, scheduled_for, og_title, og_description, og_image, og_url)
     )
+    new_post_id = cursor.lastrowid
+
+    poll_opt1 = request.form.get("poll_opt1", "").strip()
+    poll_opt2 = request.form.get("poll_opt2", "").strip()
+    if poll_opt1 and poll_opt2:
+        cursor.execute("INSERT INTO polls (post_id) VALUES (?)", (new_post_id,))
+        poll_id = cursor.lastrowid
+        cursor.execute("INSERT INTO poll_options (poll_id, text) VALUES (?, ?)", (poll_id, poll_opt1))
+        cursor.execute("INSERT INTO poll_options (poll_id, text) VALUES (?, ?)", (poll_id, poll_opt2))
+
     db.commit()
     return redirect(url_for("index"))
+
+@app.route("/poll/vote/<int:option_id>", methods=["POST"])
+@login_required
+def vote_poll(option_id):
+    db = get_db()
+    opt = db.execute("SELECT * FROM poll_options WHERE id = ?", (option_id,)).fetchone()
+    if not opt:
+        flash("Poll option not found.")
+        return redirect(url_for("index"))
+    poll_id = opt["poll_id"]
+    
+    existing = db.execute("SELECT * FROM poll_votes WHERE poll_id = ? AND user_id = ?", (poll_id, session["user_id"])).fetchone()
+    if existing:
+        flash("You have already voted in this poll.")
+        return redirect(request.referrer or url_for("index"))
+    
+    db.execute("INSERT INTO poll_votes (poll_id, user_id, option_id) VALUES (?, ?, ?)", (poll_id, session["user_id"], option_id))
+    db.execute("UPDATE poll_options SET votes = votes + 1 WHERE id = ?", (option_id,))
+    db.commit()
+    return redirect(request.referrer or url_for("index"))
 
 @app.route("/story", methods=["POST"])
 @login_required
@@ -1125,6 +1369,12 @@ def _react(post_id, kind, reason=""):
         db.execute("DELETE FROM reactions WHERE id = ?", (existing["id"],))
     db.execute("INSERT INTO reactions (post_id, user_id, kind, reason) VALUES (?, ?, ?, ?)", (post_id, session["user_id"], kind, reason))
     db.commit()
+    
+    post_owner = db.execute("SELECT user_id FROM posts WHERE id = ?", (post_id,)).fetchone()
+    if post_owner and post_owner["user_id"] != session["user_id"]:
+        db.execute("INSERT INTO notifications (user_id, message) VALUES (?, ?)", (post_owner["user_id"], f"@{session['username']} reacted to your post."))
+        db.commit()
+        socketio.emit('new_notification', {'message': 'New reaction'}, room=f"user_{post_owner['user_id']}")
 
 @app.route("/post/<int:post_id>/resonate", methods=["POST"])
 @login_required
@@ -1153,7 +1403,7 @@ def break_post(post_id):
     _react(post_id, "break", reason)
     db.execute("INSERT INTO posts (user_id, content, is_stance, break_of_id) VALUES (?, ?, 1, ?)", (session["user_id"], reason, post_id))
     db.commit()
-    return redirect(url_for("post_detail", post_id=post_id))
+    return redirect(request.referrer or url_for("post_detail", post_id=post_id))
 
 @app.route("/explore")
 def explore():
@@ -1233,6 +1483,9 @@ def toggle_follow(user_id):
     else:
         db.execute("INSERT INTO follows (follower_id, followed_id) VALUES (?, ?)", (session["user_id"], user_id))
         db.commit()
+        db.execute("INSERT INTO notifications (user_id, message) VALUES (?, ?)", (user_id, f"@{session['username']} started following you."))
+        db.commit()
+        socketio.emit('new_notification', {'message': 'New follower'}, room=f"user_{user_id}")
         flash(f"Now following @{target['username'] if target else ''}.")
     return redirect(request.referrer or url_for("index"))
 
@@ -1362,6 +1615,12 @@ def notifications_json():
     notifs = db.execute("SELECT * FROM notifications WHERE user_id = ? AND is_read = 0", (session["user_id"],)).fetchall()
     return jsonify([dict(n) for n in notifs])
 
+@socketio.on('join_notifications')
+def handle_join_notifications(data):
+    user_id = data.get('user_id')
+    if user_id:
+        join_room(f"user_{user_id}")
+
 @socketio.on('join_chat')
 def handle_join(data):
     if "user_id" not in session:
@@ -1392,6 +1651,10 @@ def chat(recipient_id):
             db.execute("INSERT INTO messages (sender_id, recipient_id, content) VALUES (?, ?, ?)", (session["user_id"], recipient_id, content))
             db.commit()
             
+            db.execute("INSERT INTO notifications (user_id, message) VALUES (?, ?)", (recipient_id, f"@{session['username']} sent you a message."))
+            db.commit()
+            socketio.emit('new_notification', {'message': 'New message'}, room=f"user_{recipient_id}")
+            
             msg = {
                 "sender_id": session["user_id"],
                 "recipient_id": recipient_id,
@@ -1415,7 +1678,3 @@ def chat_json(recipient_id):
     return jsonify({
         "messages": [dict(r) for r in rows]
     })
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5001))
-    socketio.run(app, host="0.0.0.0", port=port, debug=os.environ.get("PULSE_DEBUG", "1") == "1")
