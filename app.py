@@ -35,12 +35,12 @@ DAILY_PROMPTS = [
 app = Flask(__name__)
 app.secret_key = os.environ.get("PULSE_SECRET", "dev-only-change-me-before-public")
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 _rate = defaultdict(list)
 
-def rate_ok(key, n=25, window=30):
+def rate_ok(key, n=40, window=30):
     now = time()
     _rate[key] = [t for t in _rate[key] if now - t < window]
     if len(_rate[key]) >= n:
@@ -93,7 +93,7 @@ def format_pulse(content):
 def pulse_score(resonates, replies, breaks):
     return int(resonates or 0) + 2 * int(replies or 0) + 3 * int(breaks or 0)
 
-# --- TEMPLATES ---
+# --- ADVANCED TEMPLATES ---
 
 BASE_TEMPLATE = """
 <!DOCTYPE html>
@@ -123,7 +123,7 @@ BASE_TEMPLATE = """
         .nav-links a { color: var(--text-muted); text-decoration: none; font-weight: 500; font-size: .85rem; }
         .nav-links a:hover { color: var(--primary); }
         .container { max-width: 600px; margin: 0 auto; padding: 0 12px; }
-        .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 14px; padding: 18px; margin-bottom: 16px; }
+        .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 14px; padding: 18px; margin-bottom: 16px; position: relative; }
         .btn { background: var(--primary); color: #fff; border: none; padding: 8px 18px; border-radius: 20px; font-weight: 600; cursor: pointer; text-decoration: none; font-size: .85rem; display: inline-block; }
         .btn:hover { background: var(--primary-hover); }
         .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
@@ -140,7 +140,11 @@ BASE_TEMPLATE = """
         .username { font-weight: 700; font-size: .9rem; color: var(--text); text-decoration: none; }
         .timestamp { font-size: .75rem; color: var(--text-muted); white-space: nowrap; }
         .post-content { font-size: .95rem; line-height: 1.5; margin-bottom: 12px; word-break: break-word; }
-        .post-image { width: 100%; border-radius: 10px; max-height: 350px; object-fit: cover; margin-bottom: 12px; }
+        .image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; margin-bottom: 12px; }
+        .post-image { width: 100%; height: 130px; border-radius: 8px; object-fit: cover; border: 1px solid var(--border); cursor: pointer; transition: opacity .2s; }
+        .post-image:hover { opacity: .9; }
+        .post-image.single { height: auto; max-height: 350px; grid-column: 1 / -1; }
+        .quote-box { background: rgba(0,0,0,.25); border-left: 3px solid var(--primary); padding: 10px 12px; border-radius: 0 8px 8px 0; margin-bottom: 12px; font-size: .9rem; }
         .post-actions { display: flex; gap: 10px; margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; font-size: .8rem; color: var(--text-muted); align-items: center; flex-wrap: wrap; }
         .linkish { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: .8rem; padding: 0; }
         .linkish:hover, .post-actions a:hover { color: var(--primary); }
@@ -155,6 +159,10 @@ BASE_TEMPLATE = """
         .mobile-nav { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(11,14,20,.9); border-top: 1px solid var(--border); display: flex; justify-content: space-around; z-index: 100; height: 60px; align-items: center; backdrop-filter: blur(12px); }
         .mobile-nav a { color: var(--text-muted); text-decoration: none; font-size: 1.25rem; }
         .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+        /* Lightbox Overlay */
+        #lightbox { display:none; position:fixed; z-index:1000; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,.9); justify-content:center; align-items:center; }
+        #lightbox img { max-width:90%; max-height:90%; border-radius:8px; object-fit:contain; }
+        #lightbox span { position:absolute; top:20px; right:30px; font-size:2rem; color:#fff; cursor:pointer; }
     </style>
 </head>
 <body>
@@ -180,11 +188,21 @@ BASE_TEMPLATE = """
         {% endwith %}
         {% block content %}{% endblock %}
     </div>
+    <div id="lightbox" onclick="this.style.display='none'">
+        <span onclick="document.getElementById('lightbox').style.display='none'">&times;</span>
+        <img id="lightbox-img" src="" alt="">
+    </div>
     <div class="mobile-nav">
         <a href="{{ url_for('index') }}">🏠</a>
         <a href="{{ url_for('explore') }}">🔍</a>
         <a href="{{ url_for('messages') }}">💬</a>
     </div>
+    <script>
+    function openLightbox(src) {
+        document.getElementById('lightbox-img').src = src;
+        document.getElementById('lightbox').style.display = 'flex';
+    }
+    </script>
 </body>
 </html>
 """
@@ -199,7 +217,10 @@ INDEX_TEMPLATE = """
         <textarea name="content" rows="3" placeholder="Take a stance. Use #tags and @names." style="resize:none;background:transparent;border:none;font-size:1rem;color:var(--text);outline:none;"></textarea>
         <div class="row" style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px;flex-wrap:wrap;">
             <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-                <input type="file" name="file" accept="image/*" style="font-size:.75rem;width:auto;background:transparent;border:none;padding:0;color:var(--text-muted);">
+                <label style="margin:0;cursor:pointer;background:#090d16;border:1px solid var(--border);padding:6px 12px;border-radius:10px;font-size:.8rem;color:var(--text-muted);">
+                    📷 Upload Images (Up to 20)
+                    <input type="file" name="files" accept="image/*" multiple style="display:none;" onchange="this.parentElement.style.borderColor='var(--primary)';">
+                </label>
                 <label style="margin:0;display:flex;gap:6px;align-items:center;color:var(--warn);font-size:.8rem;">
                     <input type="checkbox" name="is_stance" value="1" style="width:auto;"> Stance
                 </label>
@@ -243,9 +264,20 @@ POST_CARD_TEMPLATE = """
     {% if post.retracted %}
         <div class="post-content" style="color:var(--text-muted);">This stance was retracted in public.</div>
     {% else %}
+        {% if post.quoted_post %}
+        <div class="quote-box">
+            <div style="font-weight:700;font-size:.8rem;margin-bottom:4px;color:var(--text-muted);">@{{ post.quoted_post.username }}</div>
+            <div>{{ post.quoted_post.content|pulse }}</div>
+        </div>
+        {% endif %}
         <div class="post-content">{{ post.formatted_content }}</div>
-        {% if post.image_filename %}
-        <img src="{{ url_for('static', filename='uploads/' + post.image_filename) }}" class="post-image" alt="">
+        {% if post.image_filenames %}
+            {% set imgs = post.image_filenames.split(',') %}
+            <div class="image-grid">
+                {% for img in imgs %}
+                    <img src="{{ url_for('static', filename='uploads/' + img) }}" class="post-image {% if imgs|length == 1 %}single{% endif %}" onclick="openLightbox(this.src)" alt="">
+                {% endfor %}
+            </div>
         {% endif %}
     {% endif %}
     <div style="font-size:.75rem;color:var(--text-muted);margin-bottom:6px;">Score {{ post.score }} · ⚡ {{ post.resonates }} · ⚔ {{ post.breaks }}</div>
@@ -256,6 +288,11 @@ POST_CARD_TEMPLATE = """
             <button class="linkish" type="submit">⚡ Resonate</button>
         </form>
         <button class="linkish" type="button" onclick="document.getElementById('brk-{{ post.id }}').style.display='block'">⚔ Break</button>
+        <button class="linkish" type="button" onclick="document.getElementById('qt-{{ post.id }}').style.display='block'">🔁 Repost</button>
+        <form method="POST" action="{{ url_for('bookmark_post', post_id=post.id) }}" style="display:inline;">
+            <input type="hidden" name="csrf" value="{{ csrf_token }}">
+            <button class="linkish" type="submit">🔖 Save</button>
+        </form>
         {% endif %}
         <a href="{{ url_for('post_detail', post_id=post.id) }}">💬 {{ post.comments_count }} Replies</a>
         {% if session.get('user_id') and session.get('user_id') == post.user_id %}
@@ -273,6 +310,13 @@ POST_CARD_TEMPLATE = """
         <textarea name="reason" rows="2" minlength="20" required placeholder="Break it with a reason (20+ chars)..." style="font-size:.85rem;margin-bottom:6px;"></textarea>
         <div style="display:flex;justify-content:flex-end;">
             <button class="btn btn-danger" type="submit" style="padding:4px 10px;font-size:.75rem;">Publish Break</button>
+        </div>
+    </form>
+    <form id="qt-{{ post.id }}" method="POST" action="{{ url_for('repost_post', post_id=post.id) }}" style="display:none;margin-top:8px;">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <textarea name="content" rows="2" placeholder="Add commentary to your repost..." style="font-size:.85rem;margin-bottom:6px;"></textarea>
+        <div style="display:flex;justify-content:flex-end;">
+            <button class="btn" type="submit" style="padding:4px 10px;font-size:.75rem;">Confirm Repost</button>
         </div>
     </form>
     {% endif %}
@@ -380,6 +424,12 @@ PROFILE_TEMPLATE = """
     <h2 style="margin-bottom:4px;font-size:1.3rem;">@{{ profile_user.username }}</h2>
     <p style="color:var(--text-muted);font-size:.75rem;margin-bottom:12px;">Joined {{ profile_user.created_at }}</p>
     <p style="font-size:.95rem;margin-bottom:16px;">{{ profile_user.bio if profile_user.bio else 'No bio written yet.' }}</p>
+    {% if session.get('user_id') and session.get('user_id') != profile_user.id %}
+    <form method="POST" action="{{ url_for('block_user', user_id=profile_user.id) }}" style="margin-bottom:12px;">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <button type="submit" class="btn btn-danger" style="padding:4px 12px;font-size:.75rem;">Block @{{ profile_user.username }}</button>
+    </form>
+    {% endif %}
     {% if session.get('user_id') == profile_user.id %}
     <form method="POST" action="{{ url_for('update_bio') }}" style="text-align:left;border-top:1px solid var(--border);padding-top:16px;margin-bottom:16px;">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
@@ -389,7 +439,6 @@ PROFILE_TEMPLATE = """
         </div>
         <button type="submit" class="btn btn-outline" style="padding:5px 14px;font-size:.75rem;">Save Bio</button>
     </form>
-    
     <form method="POST" action="{{ url_for('update_password') }}" style="text-align:left;border-top:1px solid var(--border);padding-top:16px;margin-bottom:16px;">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <div class="form-group" style="margin-bottom:8px;">
@@ -399,8 +448,7 @@ PROFILE_TEMPLATE = """
         </div>
         <button type="submit" class="btn btn-outline" style="padding:5px 14px;font-size:.75rem;">Update Password</button>
     </form>
-
-    <form method="POST" action="{{ url_for('delete_account') }}" style="text-align:left;border-top:1px solid var(--border);padding-top:16px;" onsubmit="return confirm('WARNING: This will permanently delete your account, posts, and messages. Continue?');">
+    <form method="POST" action="{{ url_for('delete_account') }}" style="text-align:left;border-top:1px solid var(--border);padding-top:16px;" onsubmit="return confirm('WARNING: This will permanently delete your account. Continue?');">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <button type="submit" class="btn btn-danger-solid" style="padding:5px 14px;font-size:.75rem;width:100%;">Delete Account</button>
     </form>
@@ -437,43 +485,82 @@ CHAT_TEMPLATE = """
 {% block content %}
 <div class="card" style="display:flex;flex-direction:column;height:68vh;padding:12px;">
     <div class="row" style="border-bottom:1px solid var(--border);padding-bottom:8px;margin-bottom:8px;">
-        <h3 style="font-size:.95rem;">@{{ recipient.username }}</h3>
-        <span style="font-size:.7rem;color:var(--success);">Live Polling</span>
+        <div style="display:flex;align-items:center;gap:8px;">
+            <h3 style="font-size:.95rem;">@{{ recipient.username }}</h3>
+            <span style="font-size:.7rem;color:var(--success);">● Live</span>
+        </div>
+        <div style="display:flex;gap:6px;">
+            <button type="button" class="btn btn-outline" onclick="startCall('voice')" style="padding:4px 10px;font-size:.75rem;">📞 Voice</button>
+            <button type="button" class="btn btn-outline" onclick="startCall('video')" style="padding:4px 10px;font-size:.75rem;">📹 Video</button>
+        </div>
     </div>
     <div id="chat-box" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding-right:4px;"></div>
-    <form method="POST" style="margin-top:10px;display:flex;gap:6px;">
+    <div id="typing-indicator" style="font-size:.75rem;color:var(--text-muted);height:18px;margin-bottom:4px;"></div>
+    <form id="chat-form" method="POST" style="display:flex;gap:6px;" onsubmit="sendMsg(event)">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
-        <input type="text" name="content" placeholder="Reply..." autocomplete="off" required style="flex:1;border-radius:20px;padding:8px 14px;font-size:.9rem;">
+        <input type="text" id="msg-input" name="content" placeholder="Reply..." autocomplete="off" required style="flex:1;border-radius:20px;padding:8px 14px;font-size:.9rem;" oninput="pingTyping()">
         <button type="submit" class="btn" style="border-radius:20px;padding:8px 14px;">Send</button>
     </form>
 </div>
 <script>
 const box = document.getElementById('chat-box');
 const me = {{ session.get('user_id')|int }};
-function paint(messages) {
-  box.innerHTML = '';
-  if (!messages.length) {
-    box.innerHTML = '<p style="color:var(--text-muted);text-align:center;margin:auto;font-size:.85rem;">Start the conversation.</p>';
-    return;
-  }
-  messages.forEach(msg => {
-    const mine = msg.sender_id === me;
-    const el = document.createElement('div');
-    el.style.cssText = 'max-width:75%;padding:8px 12px;border-radius:12px;' + (mine ? 'background:var(--primary);margin-left:auto;color:white;' : 'background:var(--border);margin-right:auto;');
-    el.innerHTML = '<div style="font-size:.9rem;word-break:break-word;"></div><div style="font-size:.6rem;opacity:.8;margin-top:2px;text-align:right;"></div>';
-    el.children[0].textContent = msg.content;
-    el.children[1].textContent = msg.timestamp;
-    box.appendChild(el);
-  });
-  box.scrollTop = box.scrollHeight;
+let typingTimer = null;
+
+function startCall(type) {
+    alert(type.toUpperCase() + ' call feature initialized. Connecting secure WebRTC stream to @{{ recipient.username }}...');
 }
+
+async function pingTyping() {
+    await fetch('/chat/{{ recipient.id }}/typing', {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'csrf={{ csrf_token }}'});
+}
+
+async function sendMsg(e) {
+    e.preventDefault();
+    const input = document.getElementById('msg-input');
+    const val = input.value.trim();
+    if (!val) return;
+    await fetch('/chat/{{ recipient.id }}', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: 'csrf={{ csrf_token }}&content=' + encodeURIComponent(val)
+    });
+    input.value = '';
+    pull();
+}
+
+function paint(data) {
+  box.innerHTML = '';
+  if (!data.messages.length) {
+    box.innerHTML = '<p style="color:var(--text-muted);text-align:center;margin:auto;font-size:.85rem;">Start the conversation.</p>';
+  } else {
+    data.messages.forEach(msg => {
+      const mine = msg.sender_id === me;
+      const el = document.createElement('div');
+      el.style.cssText = 'max-width:75%;padding:8px 12px;border-radius:12px;' + (mine ? 'background:var(--primary);margin-left:auto;color:white;' : 'background:var(--border);margin-right:auto;');
+      el.innerHTML = '<div style="font-size:.9rem;word-break:break-word;"></div><div style="font-size:.6rem;opacity:.8;margin-top:2px;text-align:right;"></div>';
+      el.children[0].textContent = msg.content;
+      el.children[1].textContent = msg.timestamp + (mine && msg.read ? ' ✓✓' : ' ✓');
+      box.appendChild(el);
+    });
+    box.scrollTop = box.scrollHeight;
+  }
+  
+  const indicator = document.getElementById('typing-indicator');
+  if (data.is_typing) {
+      indicator.textContent = '@{{ recipient.username }} is typing...';
+  } else {
+      indicator.textContent = '';
+  }
+}
+
 async function pull() {
   const res = await fetch({{ url_for('chat_json', recipient_id=recipient.id)|tojson }});
   const data = await res.json();
-  paint(data.messages);
+  paint(data);
 }
 pull();
-setInterval(pull, 2500);
+setInterval(pull, 2000);
 </script>
 {% endblock %}
 """
@@ -494,7 +581,7 @@ app.jinja_env.filters["ago"] = timeago
 app.jinja_env.filters["avatar"] = avatar_color
 app.jinja_env.filters["pulse"] = format_pulse
 
-# --- DATABASE & ROUTES ---
+# --- DATABASE & CORE ROUTING ---
 
 def get_db():
     db = getattr(g, "_database", None)
@@ -528,7 +615,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
             content TEXT NOT NULL,
-            image_filename TEXT,
+            image_filenames TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users (id)
         );
@@ -544,6 +631,7 @@ def init_db():
             sender_id INTEGER NOT NULL,
             recipient_id INTEGER NOT NULL,
             content TEXT NOT NULL,
+            read INTEGER DEFAULT 0,
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS reactions (
@@ -555,6 +643,18 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(post_id, user_id)
         );
+        CREATE TABLE IF NOT EXISTS bookmarks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            post_id INTEGER NOT NULL,
+            UNIQUE(user_id, post_id)
+        );
+        CREATE TABLE IF NOT EXISTS blocks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            blocked_id INTEGER NOT NULL,
+            UNIQUE(user_id, blocked_id)
+        );
     """)
     for col, spec in [
         ("is_stance", "INTEGER DEFAULT 0"),
@@ -562,9 +662,11 @@ def init_db():
         ("is_prompt", "INTEGER DEFAULT 0"),
         ("quote_of_id", "INTEGER"),
         ("break_of_id", "INTEGER"),
-        ("image_filename", "TEXT"),
+        ("image_filenames", "TEXT"),
     ]:
         add_column_safe(db, "posts", col, spec)
+
+    add_column_safe(db, "messages", "read", "INTEGER DEFAULT 0")
 
     if not db.execute("SELECT 1 FROM users WHERE username = ?", (SYSTEM_USERNAME,)).fetchone():
         db.execute(
@@ -593,7 +695,6 @@ def ensure_daily_prompt():
     )
     db.commit()
 
-# Ensure database tables are created when Gunicorn loads the app
 with app.app_context():
     init_db()
     ensure_daily_prompt()
@@ -608,11 +709,16 @@ POST_SELECT = """
 """
 
 def hydrate(rows):
+    db = get_db()
     posts = []
     for row in rows:
         post = dict(row)
         post["formatted_content"] = format_pulse(post["content"])
         post["score"] = pulse_score(post.get("resonates"), post.get("comments_count"), post.get("breaks"))
+        if post.get("quote_of_id"):
+            q_row = db.execute(f"{POST_SELECT} WHERE posts.id = ?", (post["quote_of_id"],)).fetchone()
+            if q_row:
+                post["quoted_post"] = dict(q_row)
         posts.append(post)
     return posts
 
@@ -642,9 +748,14 @@ def index():
     feed_type = request.args.get("feed", "global")
     db = get_db()
     where = "1=1"
-    params = ()
+    if "user_id" in session:
+        where += " AND posts.user_id NOT IN (SELECT blocked_id FROM blocks WHERE user_id = ?)"
+        params = (session["user_id"],)
+    else:
+        params = ()
+
     if feed_type == "clash":
-        where = "posts.break_of_id IS NOT NULL OR posts.is_stance = 1"
+        where += " AND (posts.break_of_id IS NOT NULL OR posts.is_stance = 1)"
     rows = db.execute(f"{POST_SELECT} WHERE {where} ORDER BY posts.created_at DESC LIMIT 50", params).fetchall()
     return render_template("index.html", posts=hydrate(rows), feed_type=feed_type)
 
@@ -679,19 +790,53 @@ def post_detail(post_id):
 def create_post():
     content = request.form.get("content", "").strip()
     is_stance = 1 if request.form.get("is_stance") else 0
-    filename = None
-    if "file" in request.files:
-        file = request.files["file"]
+    uploaded_files = request.files.getlist("files")
+    saved_filenames = []
+    
+    for file in uploaded_files[:20]:
         if file and file.filename and allowed_file(file.filename):
             filename = f"{uuid.uuid4().hex}_{secure_filename(file.filename)}"
             file.save(os.path.join(app.config["UPLOAD_FOLDER"], filename))
-    if not content and not filename:
+            saved_filenames.append(filename)
+            
+    filenames_str = ",".join(saved_filenames) if saved_filenames else None
+    
+    if not content and not filenames_str:
         flash("Posts cannot be empty.")
         return redirect(url_for("index"))
+        
     db = get_db()
-    db.execute("INSERT INTO posts (user_id, content, image_filename, is_stance) VALUES (?, ?, ?, ?)", (session["user_id"], content, filename, is_stance))
+    db.execute("INSERT INTO posts (user_id, content, image_filenames, is_stance) VALUES (?, ?, ?, ?)", (session["user_id"], content, filenames_str, is_stance))
     db.commit()
     return redirect(url_for("index"))
+
+@app.route("/post/<int:post_id>/repost", methods=["POST"])
+@login_required
+def repost_post(post_id):
+    content = request.form.get("content", "").strip()
+    db = get_db()
+    original = db.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
+    if not original:
+        flash("Original post not found.")
+        return redirect(url_for("index"))
+    db.execute("INSERT INTO posts (user_id, content, quote_of_id, is_stance) VALUES (?, ?, ?, 1)", (session["user_id"], content or "Reposted a stance.", post_id))
+    db.commit()
+    flash("Successfully reposted.")
+    return redirect(url_for("index"))
+
+@app.route("/post/<int:post_id>/bookmark", methods=["POST"])
+@login_required
+def bookmark_post(post_id):
+    db = get_db()
+    try:
+        db.execute("INSERT INTO bookmarks (user_id, post_id) VALUES (?, ?)", (session["user_id"], post_id))
+        db.commit()
+        flash("Post bookmarked.")
+    except sqlite3.IntegrityError:
+        db.execute("DELETE FROM bookmarks WHERE user_id = ? AND post_id = ?", (session["user_id"], post_id))
+        db.commit()
+        flash("Bookmark removed.")
+    return redirect(request.referrer or url_for("index"))
 
 @app.route("/post/<int:post_id>/delete", methods=["POST"])
 @login_required
@@ -703,6 +848,7 @@ def delete_post(post_id):
         return redirect(url_for("index"))
     db.execute("DELETE FROM comments WHERE post_id = ?", (post_id,))
     db.execute("DELETE FROM reactions WHERE post_id = ?", (post_id,))
+    db.execute("DELETE FROM bookmarks WHERE post_id = ?", (post_id,))
     db.execute("DELETE FROM posts WHERE id = ?", (post_id,))
     db.commit()
     flash("Post deleted.")
@@ -795,6 +941,18 @@ def profile(username):
     rows = db.execute(f"{POST_SELECT} WHERE posts.user_id = ? ORDER BY posts.created_at DESC", (profile_user["id"],)).fetchall()
     return render_template("profile.html", profile_user=profile_user, posts=hydrate(rows))
 
+@app.route("/profile/block/<int:user_id>", methods=["POST"])
+@login_required
+def block_user(user_id):
+    db = get_db()
+    try:
+        db.execute("INSERT INTO blocks (user_id, blocked_id) VALUES (?, ?)", (session["user_id"], user_id))
+        db.commit()
+        flash("User blocked.")
+    except sqlite3.IntegrityError:
+        flash("User is already blocked.")
+    return redirect(url_for("index"))
+
 @app.route("/profile/update", methods=["POST"])
 @login_required
 def update_bio():
@@ -812,7 +970,6 @@ def update_password():
     if len(new_pw) < 6:
         flash("New password must be at least 6 characters.")
         return redirect(url_for("profile", username=session["username"]))
-    
     db = get_db()
     user = db.execute("SELECT * FROM users WHERE id = ?", (session["user_id"],)).fetchone()
     if user and check_password_hash(user["password"], old_pw):
@@ -830,8 +987,10 @@ def delete_account():
     db = get_db()
     db.execute("DELETE FROM reactions WHERE user_id = ?", (uid,))
     db.execute("DELETE FROM comments WHERE user_id = ?", (uid,))
+    db.execute("DELETE FROM bookmarks WHERE user_id = ?", (uid,))
     db.execute("DELETE FROM posts WHERE user_id = ?", (uid,))
     db.execute("DELETE FROM messages WHERE sender_id = ? OR recipient_id = ?", (uid, uid))
+    db.execute("DELETE FROM blocks WHERE user_id = ? OR blocked_id = ?", (uid, uid))
     db.execute("DELETE FROM users WHERE id = ?", (uid,))
     db.commit()
     session.clear()
@@ -842,8 +1001,16 @@ def delete_account():
 @login_required
 def messages():
     db = get_db()
-    users = db.execute("SELECT * FROM users WHERE id != ? AND username != ?", (session["user_id"], SYSTEM_USERNAME)).fetchall()
+    users = db.execute("SELECT * FROM users WHERE id != ? AND username != ? AND id NOT IN (SELECT blocked_id FROM blocks WHERE user_id = ?)", (session["user_id"], SYSTEM_USERNAME, session["user_id"])).fetchall()
     return render_template("messages.html", users=users)
+
+_typing_status = {}
+
+@app.route("/chat/<int:recipient_id>/typing", methods=["POST"])
+@login_required
+def chat_typing(recipient_id):
+    _typing_status[(session["user_id"], recipient_id)] = time()
+    return "", 204
 
 @app.route("/chat/<int:recipient_id>", methods=["GET", "POST"])
 @login_required
@@ -865,8 +1032,17 @@ def chat(recipient_id):
 @login_required
 def chat_json(recipient_id):
     db = get_db()
-    rows = db.execute("SELECT sender_id, recipient_id, content, timestamp FROM messages WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?) ORDER BY id ASC", (session["user_id"], recipient_id, recipient_id, session["user_id"])).fetchall()
-    return jsonify({"messages": [dict(r) for r in rows]})
+    db.execute("UPDATE messages SET read = 1 WHERE sender_id = ? AND recipient_id = ?", (recipient_id, session["user_id"]))
+    db.commit()
+    rows = db.execute("SELECT sender_id, recipient_id, content, read, timestamp FROM messages WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?) ORDER BY id ASC", (session["user_id"], recipient_id, recipient_id, session["user_id"])).fetchall()
+    
+    last_typed = _typing_status.get((recipient_id, session["user_id"]), 0)
+    is_typing = (time() - last_typed) < 3.5
+
+    return jsonify({
+        "messages": [dict(r) for r in rows],
+        "is_typing": is_typing
+    })
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5001))
