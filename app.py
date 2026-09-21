@@ -631,7 +631,7 @@ def guard():
             flash("Slow down.")
             return redirect(request.referrer or url_for("index"))
 
-@app.route("/")
+@app.route("/", methods=["GET", "HEAD"])
 def index():
     ensure_daily_prompt()
     feed_type = request.args.get("feed", "global")
