@@ -5,7 +5,7 @@ import uuid
 import secrets
 import sqlite3
 from collections import defaultdict
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from time import time
 from functools import wraps
 
@@ -93,7 +93,7 @@ def format_pulse(content):
 def pulse_score(resonates, replies, breaks):
     return int(resonates or 0) + 2 * int(replies or 0) + 3 * int(breaks or 0)
 
-# --- ADVANCED TEMPLATES ---
+# --- TEMPLATES ---
 
 BASE_TEMPLATE = """
 <!DOCTYPE html>
@@ -136,7 +136,7 @@ BASE_TEMPLATE = """
         .alert { padding: 12px; border-radius: 10px; margin-bottom: 1rem; background: rgba(59,130,246,.1); border: 1px solid rgba(59,130,246,.3); color: #60a5fa; text-align: center; font-size: .85rem; }
         .post-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; gap: 8px; }
         .who { display: flex; align-items: center; gap: 8px; min-width: 0; }
-        .av { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; font-size: .75rem; font-weight: 800; color: #fff; flex-shrink: 0; }
+        .av { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; font-size: .75rem; font-weight: 800; color: #fff; flex-shrink: 0; object-fit: cover; border: 1px solid var(--border); }
         .username { font-weight: 700; font-size: .9rem; color: var(--text); text-decoration: none; }
         .timestamp { font-size: .75rem; color: var(--text-muted); white-space: nowrap; }
         .post-content { font-size: .95rem; line-height: 1.5; margin-bottom: 12px; word-break: break-word; }
@@ -159,7 +159,13 @@ BASE_TEMPLATE = """
         .mobile-nav { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(11,14,20,.9); border-top: 1px solid var(--border); display: flex; justify-content: space-around; z-index: 100; height: 60px; align-items: center; backdrop-filter: blur(12px); }
         .mobile-nav a { color: var(--text-muted); text-decoration: none; font-size: 1.25rem; }
         .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-        /* Lightbox Overlay */
+        /* Stories bar */
+        .stories-bar { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 12px; margin-bottom: 16px; scrollbar-width: none; }
+        .stories-bar::-webkit-scrollbar { display: none; }
+        .story-ring { width: 56px; height: 56px; border-radius: 50%; background: linear-gradient(45deg, var(--primary), var(--warn)); padding: 2px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; cursor: pointer; }
+        .story-inner { width: 100%; height: 100%; border-radius: 50%; background: var(--card-bg); display: flex; align-items: center; justify-content: center; overflow: hidden; }
+        .story-inner img { width: 100%; height: 100%; object-fit: cover; }
+        /* Lightbox */
         #lightbox { display:none; position:fixed; z-index:1000; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,.9); justify-content:center; align-items:center; }
         #lightbox img { max-width:90%; max-height:90%; border-radius:8px; object-fit:contain; }
         #lightbox span { position:absolute; top:20px; right:30px; font-size:2rem; color:#fff; cursor:pointer; }
@@ -211,6 +217,36 @@ INDEX_TEMPLATE = """
 {% extends "base.html" %}
 {% block content %}
 {% if session.get('user_id') %}
+<div class="stories-bar">
+    <div style="text-align:center;flex-shrink:0;">
+        <div class="story-ring" onclick="document.getElementById('story-upload-form').style.display=document.getElementById('story-upload-form').style.display=='none'?'block':'none'">
+            <div class="story-inner" style="background:var(--primary);color:#fff;font-size:1.2rem;font-weight:bold;">+</div>
+        </div>
+        <span style="font-size:.65rem;color:var(--text-muted);">Add 24h</span>
+    </div>
+    {% for story in stories %}
+    <div style="text-align:center;flex-shrink:0;" onclick="openLightbox('{{ url_for('static', filename='uploads/' + story.image_filename) }}')">
+        <div class="story-ring">
+            <div class="story-inner">
+                <img src="{{ url_for('static', filename='uploads/' + story.image_filename) }}" alt="">
+            </div>
+        </div>
+        <span style="font-size:.65rem;color:var(--text-muted);">@{{ story.username }}</span>
+    </div>
+    {% endfor %}
+</div>
+
+<div id="story-upload-form" class="card" style="display:none;background:#10151c;border-style:dashed;">
+    <h3 style="font-size:.9rem;margin-bottom:8px;color:var(--warn);">⏱️ Post a 24-Hour Drop</h3>
+    <form method="POST" action="{{ url_for('create_story') }}" enctype="multipart/form-data">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <input type="file" name="file" accept="image/*" required style="margin-bottom:8px;font-size:.8rem;">
+        <div style="display:flex;justify-content:flex-end;">
+            <button type="submit" class="btn" style="padding:4px 12px;font-size:.75rem;">Upload 24h Drop</button>
+        </div>
+    </form>
+</div>
+
 <div class="card">
     <form method="POST" action="{{ url_for('create_post') }}" enctype="multipart/form-data">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
@@ -218,7 +254,7 @@ INDEX_TEMPLATE = """
         <div class="row" style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px;flex-wrap:wrap;">
             <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
                 <label style="margin:0;cursor:pointer;background:#090d16;border:1px solid var(--border);padding:6px 12px;border-radius:10px;font-size:.8rem;color:var(--text-muted);">
-                    📷 Upload Images (Up to 20)
+                    📷 Upload Images (Optimized Space)
                     <input type="file" name="files" accept="image/*" multiple style="display:none;" onchange="this.parentElement.style.borderColor='var(--primary)';">
                 </label>
                 <label style="margin:0;display:flex;gap:6px;align-items:center;color:var(--warn);font-size:.8rem;">
@@ -251,7 +287,11 @@ POST_CARD_TEMPLATE = """
 <div class="card">
     <div class="post-header">
         <div class="who">
-            <div class="av" style="background:{{ post.username|avatar }}">{{ post.username[:1]|upper }}</div>
+            {% if post.avatar %}
+                <img src="{{ url_for('static', filename='uploads/' + post.avatar) }}" class="av" alt="">
+            {% else %}
+                <div class="av" style="background:{{ post.username|avatar }}">{{ post.username[:1]|upper }}</div>
+            {% endif %}
             <div>
                 <a href="{{ url_for('profile', username=post.username) }}" class="username">@{{ post.username }}</a>
                 {% if post.is_prompt %}<span class="badge badge-sys">PROMPT</span>{% endif %}
@@ -420,17 +460,31 @@ PROFILE_TEMPLATE = """
 {% extends "base.html" %}
 {% block content %}
 <div class="card" style="text-align:center;padding:24px;">
-    <div class="av" style="width:64px;height:64px;margin:0 auto 10px;font-size:1.3rem;background:{{ profile_user.username|avatar }}">{{ profile_user.username[:1]|upper }}</div>
+    {% if profile_user.avatar %}
+        <img src="{{ url_for('static', filename='uploads/' + profile_user.avatar) }}" class="av" style="width:72px;height:72px;margin:0 auto 10px;" alt="">
+    {% else %}
+        <div class="av" style="width:72px;height:72px;margin:0 auto 10px;font-size:1.5rem;background:{{ profile_user.username|avatar }}">{{ profile_user.username[:1]|upper }}</div>
+    {% endif %}
     <h2 style="margin-bottom:4px;font-size:1.3rem;">@{{ profile_user.username }}</h2>
     <p style="color:var(--text-muted);font-size:.75rem;margin-bottom:12px;">Joined {{ profile_user.created_at }}</p>
     <p style="font-size:.95rem;margin-bottom:16px;">{{ profile_user.bio if profile_user.bio else 'No bio written yet.' }}</p>
+    
     {% if session.get('user_id') and session.get('user_id') != profile_user.id %}
     <form method="POST" action="{{ url_for('block_user', user_id=profile_user.id) }}" style="margin-bottom:12px;">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <button type="submit" class="btn btn-danger" style="padding:4px 12px;font-size:.75rem;">Block @{{ profile_user.username }}</button>
     </form>
     {% endif %}
+    
     {% if session.get('user_id') == profile_user.id %}
+    <form method="POST" action="{{ url_for('update_avatar') }}" enctype="multipart/form-data" style="text-align:left;border-top:1px solid var(--border);padding-top:16px;margin-bottom:16px;">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <div class="form-group" style="margin-bottom:8px;">
+            <label>Update Profile Photo</label>
+            <input type="file" name="avatar" accept="image/*" required style="font-size:.8rem;">
+        </div>
+        <button type="submit" class="btn btn-outline" style="padding:5px 14px;font-size:.75rem;">Upload Avatar</button>
+    </form>
     <form method="POST" action="{{ url_for('update_bio') }}" style="text-align:left;border-top:1px solid var(--border);padding-top:16px;margin-bottom:16px;">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <div class="form-group" style="margin-bottom:8px;">
@@ -505,7 +559,6 @@ CHAT_TEMPLATE = """
 <script>
 const box = document.getElementById('chat-box');
 const me = {{ session.get('user_id')|int }};
-let typingTimer = null;
 
 function startCall(type) {
     alert(type.toUpperCase() + ' call feature initialized. Connecting secure WebRTC stream to @{{ recipient.username }}...');
@@ -609,6 +662,7 @@ def init_db():
             username TEXT UNIQUE NOT NULL,
             password TEXT NOT NULL,
             bio TEXT DEFAULT '',
+            avatar TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS posts (
@@ -616,6 +670,13 @@ def init_db():
             user_id INTEGER NOT NULL,
             content TEXT NOT NULL,
             image_filenames TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        );
+        CREATE TABLE IF NOT EXISTS stories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            image_filename TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users (id)
         );
@@ -663,8 +724,9 @@ def init_db():
         ("quote_of_id", "INTEGER"),
         ("break_of_id", "INTEGER"),
         ("image_filenames", "TEXT"),
+        ("avatar", "TEXT"),
     ]:
-        add_column_safe(db, "posts", col, spec)
+        add_column_safe(db, "users" if col == "avatar" else "posts", col, spec)
 
     add_column_safe(db, "messages", "read", "INTEGER DEFAULT 0")
 
@@ -700,7 +762,7 @@ with app.app_context():
     ensure_daily_prompt()
 
 POST_SELECT = """
-    SELECT posts.*, users.username,
+    SELECT posts.*, users.username, users.avatar,
            (SELECT COUNT(*) FROM reactions WHERE reactions.post_id = posts.id AND kind = 'resonate') AS resonates,
            (SELECT COUNT(*) FROM reactions WHERE reactions.post_id = posts.id AND kind = 'break') AS breaks,
            (SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id) AS comments_count
@@ -747,6 +809,12 @@ def index():
     ensure_daily_prompt()
     feed_type = request.args.get("feed", "global")
     db = get_db()
+    
+    # Clean up expired stories older than 24 hours
+    cutoff = (datetime.utcnow() - timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')
+    db.execute("DELETE FROM stories WHERE created_at < ?", (cutoff,))
+    db.commit()
+
     where = "1=1"
     if "user_id" in session:
         where += " AND posts.user_id NOT IN (SELECT blocked_id FROM blocks WHERE user_id = ?)"
@@ -757,14 +825,18 @@ def index():
     if feed_type == "clash":
         where += " AND (posts.break_of_id IS NOT NULL OR posts.is_stance = 1)"
     rows = db.execute(f"{POST_SELECT} WHERE {where} ORDER BY posts.created_at DESC LIMIT 50", params).fetchall()
-    return render_template("index.html", posts=hydrate(rows), feed_type=feed_type)
+    
+    # Fetch active 24h stories
+    stories = db.execute("SELECT stories.*, users.username FROM stories JOIN users ON stories.user_id = users.id ORDER BY stories.created_at DESC").fetchall()
+    
+    return render_template("index.html", posts=hydrate(rows), stories=stories, feed_type=feed_type)
 
 @app.route("/tag/<tagname>")
 def tag_feed(tagname):
     db = get_db()
     tag_query = f"%{tagname}%"
     rows = db.execute(f"{POST_SELECT} WHERE posts.content LIKE ? ORDER BY posts.created_at DESC LIMIT 50", (tag_query,)).fetchall()
-    return render_template("index.html", posts=hydrate(rows), feed_type="global", page_title=f"Tag: {tagname}")
+    return render_template("index.html", posts=hydrate(rows), stories=[], feed_type="global", page_title=f"Tag: {tagname}")
 
 @app.route("/post/<int:post_id>", methods=["GET", "POST"])
 def post_detail(post_id):
@@ -808,6 +880,21 @@ def create_post():
     db = get_db()
     db.execute("INSERT INTO posts (user_id, content, image_filenames, is_stance) VALUES (?, ?, ?, ?)", (session["user_id"], content, filenames_str, is_stance))
     db.commit()
+    return redirect(url_for("index"))
+
+@app.route("/story", methods=["POST"])
+@login_required
+def create_story():
+    file = request.files.get("file")
+    if file and file.filename and allowed_file(file.filename):
+        filename = f"story_{uuid.uuid4().hex}_{secure_filename(file.filename)}"
+        file.save(os.path.join(app.config["UPLOAD_FOLDER"], filename))
+        db = get_db()
+        db.execute("INSERT INTO stories (user_id, image_filename) VALUES (?, ?)", (session["user_id"], filename))
+        db.commit()
+        flash("24-hour drop uploaded successfully!")
+    else:
+        flash("Invalid image file for story.")
     return redirect(url_for("index"))
 
 @app.route("/post/<int:post_id>/repost", methods=["POST"])
@@ -953,6 +1040,21 @@ def block_user(user_id):
         flash("User is already blocked.")
     return redirect(url_for("index"))
 
+@app.route("/profile/avatar", methods=["POST"])
+@login_required
+def update_avatar():
+    file = request.files.get("avatar")
+    if file and file.filename and allowed_file(file.filename):
+        filename = f"avatar_{uuid.uuid4().hex}_{secure_filename(file.filename)}"
+        file.save(os.path.join(app.config["UPLOAD_FOLDER"], filename))
+        db = get_db()
+        db.execute("UPDATE users SET avatar = ? WHERE id = ?", (filename, session["user_id"]))
+        db.commit()
+        flash("Profile picture updated successfully!")
+    else:
+        flash("Invalid image for profile picture.")
+    return redirect(url_for("profile", username=session["username"]))
+
 @app.route("/profile/update", methods=["POST"])
 @login_required
 def update_bio():
@@ -989,6 +1091,7 @@ def delete_account():
     db.execute("DELETE FROM comments WHERE user_id = ?", (uid,))
     db.execute("DELETE FROM bookmarks WHERE user_id = ?", (uid,))
     db.execute("DELETE FROM posts WHERE user_id = ?", (uid,))
+    db.execute("DELETE FROM stories WHERE user_id = ?", (uid,))
     db.execute("DELETE FROM messages WHERE sender_id = ? OR recipient_id = ?", (uid, uid))
     db.execute("DELETE FROM blocks WHERE user_id = ? OR blocked_id = ?", (uid, uid))
     db.execute("DELETE FROM users WHERE id = ?", (uid,))
@@ -1047,3 +1150,4 @@ def chat_json(recipient_id):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5001))
     app.run(host="0.0.0.0", port=port, debug=os.environ.get("PULSE_DEBUG", "1") == "1")
+
