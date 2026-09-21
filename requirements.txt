@@ -9,3 +9,4 @@ beautifulsoup4==4.12.3
 requests==2.32.3
 Pillow==10.4.0
 reportlab==4.2.5
+setuptools==75.1.0
