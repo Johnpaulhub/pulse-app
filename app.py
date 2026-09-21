@@ -528,7 +528,7 @@ PROFILE_TEMPLATE = """
     <p style="color:var(--text-muted);font-size:.75rem;margin-bottom:12px;">Joined {{ profile_user.created_at }}</p>
     <p style="font-size:.95rem;margin-bottom:16px;">{{ profile_user.bio if profile_user.bio else 'No bio written yet.' }}</p>
     
-    {% if session.get('user_id') and session.get('user_id'] != profile_user.id %}
+    {% if session.get('user_id') and session.get('user_id') != profile_user.id %}
     <div style="display:flex;justify-content:center;gap:8px;margin-bottom:12px;">
         <form method="POST" action="{{ url_for('toggle_follow', user_id=profile_user.id) }}">
             <input type="hidden" name="csrf" value="{{ csrf_token }}">
