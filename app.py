@@ -593,6 +593,11 @@ def ensure_daily_prompt():
     )
     db.commit()
 
+# Ensure database tables are created when Gunicorn loads the app
+with app.app_context():
+    init_db()
+    ensure_daily_prompt()
+
 POST_SELECT = """
     SELECT posts.*, users.username,
            (SELECT COUNT(*) FROM reactions WHERE reactions.post_id = posts.id AND kind = 'resonate') AS resonates,
@@ -864,8 +869,5 @@ def chat_json(recipient_id):
     return jsonify({"messages": [dict(r) for r in rows]})
 
 if __name__ == "__main__":
-    with app.app_context():
-        init_db()
-        ensure_daily_prompt()
     port = int(os.environ.get("PORT", 5001))
     app.run(host="0.0.0.0", port=port, debug=os.environ.get("PULSE_DEBUG", "1") == "1")
