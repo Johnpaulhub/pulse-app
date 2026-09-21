@@ -13,13 +13,21 @@ from flask import (
     Flask, render_template, request, redirect, url_for, session,
     flash, g, send_file, jsonify, abort
 )
+from flask_socketio import SocketIO, join_room, leave_room, emit
 from jinja2 import DictLoader
 from markupsafe import Markup, escape
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
+from bs4 import BeautifulSoup
+import requests
+from PIL import Image
+
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 UPLOAD_FOLDER = "static/uploads"
-ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif"}
+ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
 DATABASE = "unique_social.db"
 SYSTEM_USERNAME = "pulse"
 
@@ -38,6 +46,7 @@ app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+socketio = SocketIO(app, cors_allowed_origins="*")
 _rate = defaultdict(list)
 
 def rate_ok(key, n=40, window=30):
@@ -50,6 +59,20 @@ def rate_ok(key, n=40, window=30):
 
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def optimize_image(file_storage, output_path, max_size=(1200, 1200), quality=80):
+    try:
+        img = Image.open(file_storage)
+        img.verify()
+        file_storage.seek(0)
+        img = Image.open(file_storage)
+        img.thumbnail(max_size)
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        img.save(output_path, "WEBP", quality=quality)
+        return True
+    except Exception:
+        return False
 
 def login_required(fn):
     @wraps(fn)
@@ -102,6 +125,7 @@ BASE_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Pulse</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
     <style>
         :root {
             --bg: #0b0e14;
@@ -159,13 +183,11 @@ BASE_TEMPLATE = """
         .mobile-nav { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(11,14,20,.9); border-top: 1px solid var(--border); display: flex; justify-content: space-around; z-index: 100; height: 60px; align-items: center; backdrop-filter: blur(12px); }
         .mobile-nav a { color: var(--text-muted); text-decoration: none; font-size: 1.25rem; }
         .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-        /* Stories bar */
         .stories-bar { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 12px; margin-bottom: 16px; scrollbar-width: none; }
         .stories-bar::-webkit-scrollbar { display: none; }
         .story-ring { width: 56px; height: 56px; border-radius: 50%; background: linear-gradient(45deg, var(--primary), var(--warn)); padding: 2px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; cursor: pointer; }
         .story-inner { width: 100%; height: 100%; border-radius: 50%; background: var(--card-bg); display: flex; align-items: center; justify-content: center; overflow: hidden; }
         .story-inner img { width: 100%; height: 100%; object-fit: cover; }
-        /* Lightbox */
         #lightbox { display:none; position:fixed; z-index:1000; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,.9); justify-content:center; align-items:center; }
         #lightbox img { max-width:90%; max-height:90%; border-radius:8px; object-fit:contain; }
         #lightbox span { position:absolute; top:20px; right:30px; font-size:2rem; color:#fff; cursor:pointer; }
@@ -177,8 +199,10 @@ BASE_TEMPLATE = """
         <div class="nav-links">
             <a href="{{ url_for('index') }}">Home</a>
             <a href="{{ url_for('explore') }}">Explore</a>
+            <a href="{{ url_for('trending_page') }}">🔥 Trending</a>
             {% if session.get('user_id') %}
                 <a href="{{ url_for('messages') }}">Inbox</a>
+                <a href="{{ url_for('notifications') }}">Notifications</a>
                 <a href="{{ url_for('profile', username=session.get('username')) }}">Profile</a>
                 <a href="{{ url_for('logout') }}" style="color:var(--danger)">Logout</a>
             {% else %}
@@ -201,9 +225,11 @@ BASE_TEMPLATE = """
     <div class="mobile-nav">
         <a href="{{ url_for('index') }}">🏠</a>
         <a href="{{ url_for('explore') }}">🔍</a>
+        <a href="{{ url_for('trending_page') }}">🔥</a>
         <a href="{{ url_for('messages') }}">💬</a>
     </div>
     <script>
+    const socket = io();
     function openLightbox(src) {
         document.getElementById('lightbox-img').src = src;
         document.getElementById('lightbox').style.display = 'flex';
@@ -254,7 +280,7 @@ INDEX_TEMPLATE = """
         <div class="row" style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px;flex-wrap:wrap;">
             <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
                 <label style="margin:0;cursor:pointer;background:#090d16;border:1px solid var(--border);padding:6px 12px;border-radius:10px;font-size:.8rem;color:var(--text-muted);">
-                    📷 Upload Images (Optimized Space)
+                    📷 Upload Images
                     <input type="file" name="files" accept="image/*" multiple style="display:none;" onchange="this.parentElement.style.borderColor='var(--primary)';">
                 </label>
                 <label style="margin:0;display:flex;gap:6px;align-items:center;color:var(--warn);font-size:.8rem;">
@@ -270,6 +296,9 @@ INDEX_TEMPLATE = """
 <div class="row" style="margin-bottom:12px;">
     <span style="font-weight:700;font-size:.95rem;color:var(--text-muted);">{{ page_title | default('Timeline') }}</span>
     <div class="feeds">
+        {% if session.get('user_id') %}
+        <a href="{{ url_for('index', feed='following') }}" class="{{ 'on' if feed_type=='following' }}">Following</a>
+        {% endif %}
         <a href="{{ url_for('index', feed='global') }}" class="{{ 'on' if feed_type=='global' }}">Unfiltered</a>
         <a href="{{ url_for('index', feed='clash') }}" class="{{ 'on' if feed_type=='clash' }}">Clash</a>
     </div>
@@ -311,6 +340,17 @@ POST_CARD_TEMPLATE = """
         </div>
         {% endif %}
         <div class="post-content">{{ post.formatted_content }}</div>
+        {% if post.og_title %}
+        <div style="border:1px solid var(--border);border-radius:8px;background:#090d16;overflow:hidden;margin-bottom:12px;">
+            {% if post.og_image %}
+            <img src="{{ post.og_image }}" style="width:100%;height:140px;object-fit:cover;" alt="">
+            {% endif %}
+            <div style="padding:10px;">
+                <div style="font-weight:700;font-size:.85rem;margin-bottom:2px;">{{ post.og_title }}</div>
+                <div style="font-size:.75rem;color:var(--text-muted);">{{ post.og_description }}</div>
+            </div>
+        </div>
+        {% endif %}
         {% if post.image_filenames %}
             {% set imgs = post.image_filenames.split(',') %}
             <div class="image-grid">
@@ -420,6 +460,25 @@ EXPLORE_TEMPLATE = """
 {% endblock %}
 """
 
+TRENDING_TEMPLATE = """
+{% extends "base.html" %}
+{% block content %}
+<div class="card" style="padding:24px;">
+    <h2 style="margin-bottom:16px;font-size:1.25rem;">🔥 Trending Conversations</h2>
+    <div style="display:flex;flex-direction:column;gap:12px;">
+        {% for tag, count in trending %}
+        <div class="row" style="padding:8px 0;border-bottom:1px solid var(--border);">
+            <a href="{{ url_for('tag_feed', tagname=tag[1:]) }}" class="tag" style="font-size:1rem;">{{ tag }}</a>
+            <span style="font-size:.8rem;color:var(--text-muted);">{{ count }} mentions</span>
+        </div>
+        {% else %}
+        <p style="color:var(--text-muted);">No active trending topics right now.</p>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}
+"""
+
 LOGIN_TEMPLATE = """
 {% extends "base.html" %}
 {% block content %}
@@ -469,12 +528,22 @@ PROFILE_TEMPLATE = """
     <p style="color:var(--text-muted);font-size:.75rem;margin-bottom:12px;">Joined {{ profile_user.created_at }}</p>
     <p style="font-size:.95rem;margin-bottom:16px;">{{ profile_user.bio if profile_user.bio else 'No bio written yet.' }}</p>
     
-    {% if session.get('user_id') and session.get('user_id') != profile_user.id %}
-    <form method="POST" action="{{ url_for('block_user', user_id=profile_user.id) }}" style="margin-bottom:12px;">
-        <input type="hidden" name="csrf" value="{{ csrf_token }}">
-        <button type="submit" class="btn btn-danger" style="padding:4px 12px;font-size:.75rem;">Block @{{ profile_user.username }}</button>
-    </form>
+    {% if session.get('user_id') and session.get('user_id'] != profile_user.id %}
+    <div style="display:flex;justify-content:center;gap:8px;margin-bottom:12px;">
+        <form method="POST" action="{{ url_for('toggle_follow', user_id=profile_user.id) }}">
+            <input type="hidden" name="csrf" value="{{ csrf_token }}">
+            <button type="submit" class="btn {% if not is_following %}btn-outline{% endif %}" style="padding:4px 14px;font-size:.75rem;">{{ 'Unfollow' if is_following else 'Follow' }}</button>
+        </form>
+        <form method="POST" action="{{ url_for('block_user', user_id=profile_user.id) }}">
+            <input type="hidden" name="csrf" value="{{ csrf_token }}">
+            <button type="submit" class="btn btn-danger" style="padding:4px 12px;font-size:.75rem;">Block</button>
+        </form>
+    </div>
     {% endif %}
+
+    <div style="margin-bottom:16px;">
+        <a href="{{ url_for('export_pdf', username=profile_user.username) }}" class="btn btn-outline" style="padding:4px 12px;font-size:.75rem;">📥 Download Activity PDF</a>
+    </div>
     
     {% if session.get('user_id') == profile_user.id %}
     <form method="POST" action="{{ url_for('update_avatar') }}" enctype="multipart/form-data" style="text-align:left;border-top:1px solid var(--border);padding-top:16px;margin-bottom:16px;">
@@ -534,6 +603,23 @@ MESSAGES_TEMPLATE = """
 {% endblock %}
 """
 
+NOTIFICATIONS_TEMPLATE = """
+{% extends "base.html" %}
+{% block content %}
+<div style="font-weight:700;margin-bottom:12px;font-size:1rem;color:var(--text-muted);">Notifications</div>
+<div class="card">
+    {% for notif in notifications %}
+    <div class="row" style="padding:10px 0;border-bottom:1px solid var(--border);font-size:.9rem;">
+        <span>{{ notif.message }}</span>
+        <span class="timestamp">{{ notif.created_at|ago }}</span>
+    </div>
+    {% else %}
+    <p style="color:var(--text-muted);text-align:center;padding:20px;">No notifications yet.</p>
+    {% endfor %}
+</div>
+{% endblock %}
+"""
+
 CHAT_TEMPLATE = """
 {% extends "base.html" %}
 {% block content %}
@@ -559,13 +645,34 @@ CHAT_TEMPLATE = """
 <script>
 const box = document.getElementById('chat-box');
 const me = {{ session.get('user_id')|int }};
+const recipientId = {{ recipient.id }};
+let typingTimer;
+
+socket.emit('join_chat', {recipient_id: recipientId});
+
+socket.on('new_message', function(msg) {
+    appendMessage(msg);
+});
+
+socket.on('typing_status', function(data) {
+    const indicator = document.getElementById('typing-indicator');
+    if (data.is_typing && data.user_id === recipientId) {
+        indicator.textContent = '@{{ recipient.username }} is typing...';
+    } else {
+        indicator.textContent = '';
+    }
+});
 
 function startCall(type) {
     alert(type.toUpperCase() + ' call feature initialized. Connecting secure WebRTC stream to @{{ recipient.username }}...');
 }
 
-async function pingTyping() {
-    await fetch('/chat/{{ recipient.id }}/typing', {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'csrf={{ csrf_token }}'});
+function pingTyping() {
+    socket.emit('typing', {recipient_id: recipientId, is_typing: true});
+    clearTimeout(typingTimer);
+    typingTimer = setTimeout(() => {
+        socket.emit('typing', {recipient_id: recipientId, is_typing: false});
+    }, 1500);
 }
 
 async function sendMsg(e) {
@@ -573,47 +680,39 @@ async function sendMsg(e) {
     const input = document.getElementById('msg-input');
     const val = input.value.trim();
     if (!val) return;
-    await fetch('/chat/{{ recipient.id }}', {
+    
+    const res = await fetch('/chat/' + recipientId, {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: 'csrf={{ csrf_token }}&content=' + encodeURIComponent(val)
     });
     input.value = '';
-    pull();
+    socket.emit('typing', {recipient_id: recipientId, is_typing: false});
+    loadMessages();
 }
 
-function paint(data) {
-  box.innerHTML = '';
-  if (!data.messages.length) {
-    box.innerHTML = '<p style="color:var(--text-muted);text-align:center;margin:auto;font-size:.85rem;">Start the conversation.</p>';
-  } else {
-    data.messages.forEach(msg => {
-      const mine = msg.sender_id === me;
-      const el = document.createElement('div');
-      el.style.cssText = 'max-width:75%;padding:8px 12px;border-radius:12px;' + (mine ? 'background:var(--primary);margin-left:auto;color:white;' : 'background:var(--border);margin-right:auto;');
-      el.innerHTML = '<div style="font-size:.9rem;word-break:break-word;"></div><div style="font-size:.6rem;opacity:.8;margin-top:2px;text-align:right;"></div>';
-      el.children[0].textContent = msg.content;
-      el.children[1].textContent = msg.timestamp + (mine && msg.read ? ' ✓✓' : ' ✓');
-      box.appendChild(el);
-    });
+function appendMessage(msg) {
+    const mine = msg.sender_id === me;
+    const el = document.createElement('div');
+    el.style.cssText = 'max-width:75%;padding:8px 12px;border-radius:12px;' + (mine ? 'background:var(--primary);margin-left:auto;color:white;' : 'background:var(--border);margin-right:auto;');
+    el.innerHTML = '<div style="font-size:.9rem;word-break:break-word;"></div><div style="font-size:.6rem;opacity:.8;margin-top:2px;text-align:right;"></div>';
+    el.children[0].textContent = msg.content;
+    el.children[1].textContent = msg.timestamp + (mine && msg.read ? ' ✓✓' : ' ✓');
+    box.appendChild(el);
     box.scrollTop = box.scrollHeight;
-  }
-  
-  const indicator = document.getElementById('typing-indicator');
-  if (data.is_typing) {
-      indicator.textContent = '@{{ recipient.username }} is typing...';
-  } else {
-      indicator.textContent = '';
-  }
 }
 
-async function pull() {
-  const res = await fetch({{ url_for('chat_json', recipient_id=recipient.id)|tojson }});
-  const data = await res.json();
-  paint(data);
+async function loadMessages() {
+    const res = await fetch('/chat/' + recipientId + '/json');
+    const data = await res.json();
+    box.innerHTML = '';
+    if (!data.messages.length) {
+        box.innerHTML = '<p style="color:var(--text-muted);text-align:center;margin:auto;font-size:.85rem;">Start the conversation.</p>';
+    } else {
+        data.messages.forEach(msg => appendMessage(msg));
+    }
 }
-pull();
-setInterval(pull, 2000);
+loadMessages();
 </script>
 {% endblock %}
 """
@@ -624,10 +723,12 @@ app.jinja_loader = DictLoader({
     "post_card.html": POST_CARD_TEMPLATE,
     "post_detail.html": POST_DETAIL_TEMPLATE,
     "explore.html": EXPLORE_TEMPLATE,
+    "trending.html": TRENDING_TEMPLATE,
     "login.html": LOGIN_TEMPLATE,
     "register.html": REGISTER_TEMPLATE,
     "profile.html": PROFILE_TEMPLATE,
     "messages.html": MESSAGES_TEMPLATE,
+    "notifications.html": NOTIFICATIONS_TEMPLATE,
     "chat.html": CHAT_TEMPLATE,
 })
 app.jinja_env.filters["ago"] = timeago
@@ -663,6 +764,9 @@ def init_db():
             password TEXT NOT NULL,
             bio TEXT DEFAULT '',
             avatar TEXT,
+            email TEXT,
+            is_verified INTEGER DEFAULT 0,
+            totp_secret TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS posts (
@@ -716,6 +820,20 @@ def init_db():
             blocked_id INTEGER NOT NULL,
             UNIQUE(user_id, blocked_id)
         );
+        CREATE TABLE IF NOT EXISTS follows (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            follower_id INTEGER NOT NULL,
+            followed_id INTEGER NOT NULL,
+            UNIQUE(follower_id, followed_id)
+        );
+        CREATE TABLE IF NOT EXISTS notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            message TEXT NOT NULL,
+            is_read INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        );
     """)
     for col, spec in [
         ("is_stance", "INTEGER DEFAULT 0"),
@@ -725,6 +843,11 @@ def init_db():
         ("break_of_id", "INTEGER"),
         ("image_filenames", "TEXT"),
         ("avatar", "TEXT"),
+        ("og_title", "TEXT"),
+        ("og_description", "TEXT"),
+        ("og_image", "TEXT"),
+        ("status", "TEXT DEFAULT 'published'"),
+        ("scheduled_for", "TIMESTAMP"),
     ]:
         add_column_safe(db, "users" if col == "avatar" else "posts", col, spec)
 
@@ -770,6 +893,24 @@ POST_SELECT = """
     JOIN users ON posts.user_id = users.id
 """
 
+def fetch_og_data(url):
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=3)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            title = soup.find('meta', property='og:title')
+            desc = soup.find('meta', property='og:description')
+            img = soup.find('meta', property='og:image')
+            return {
+                'title': title['content'] if title else None,
+                'description': desc['content'] if desc else None,
+                'image': img['content'] if img else None
+            }
+    except Exception:
+        pass
+    return None
+
 def hydrate(rows):
     db = get_db()
     posts = []
@@ -810,23 +951,25 @@ def index():
     feed_type = request.args.get("feed", "global")
     db = get_db()
     
-    # Clean up expired stories older than 24 hours
     cutoff = (datetime.utcnow() - timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')
     db.execute("DELETE FROM stories WHERE created_at < ?", (cutoff,))
     db.commit()
 
     where = "1=1"
+    params = []
     if "user_id" in session:
         where += " AND posts.user_id NOT IN (SELECT blocked_id FROM blocks WHERE user_id = ?)"
-        params = (session["user_id"],)
-    else:
-        params = ()
+        params.append(session["user_id"])
+        if feed_type == "following":
+            where += " AND (posts.user_id = ? OR posts.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?))"
+            params.extend([session["user_id"], session["user_id"]])
 
     if feed_type == "clash":
         where += " AND (posts.break_of_id IS NOT NULL OR posts.is_stance = 1)"
-    rows = db.execute(f"{POST_SELECT} WHERE {where} ORDER BY posts.created_at DESC LIMIT 50", params).fetchall()
     
-    # Fetch active 24h stories
+    where += " AND (posts.status = 'published' OR (posts.status = 'scheduled' AND posts.scheduled_for <= datetime('now')))"
+    
+    rows = db.execute(f"{POST_SELECT} WHERE {where} ORDER BY posts.created_at DESC LIMIT 50", tuple(params)).fetchall()
     stories = db.execute("SELECT stories.*, users.username FROM stories JOIN users ON stories.user_id = users.id ORDER BY stories.created_at DESC").fetchall()
     
     return render_template("index.html", posts=hydrate(rows), stories=stories, feed_type=feed_type)
@@ -836,7 +979,19 @@ def tag_feed(tagname):
     db = get_db()
     tag_query = f"%{tagname}%"
     rows = db.execute(f"{POST_SELECT} WHERE posts.content LIKE ? ORDER BY posts.created_at DESC LIMIT 50", (tag_query,)).fetchall()
-    return render_template("index.html", posts=hydrate(rows), stories=[], feed_type="global", page_title=f"Tag: {tagname}")
+    return render_template("index.html", posts=hydrate(rows), stories=[], feed_type="global", page_title=f"Tag: #{tagname}")
+
+@app.route("/trending")
+def trending_page():
+    db = get_db()
+    posts = db.execute("SELECT content FROM posts WHERE status = 'published'").fetchall()
+    hashtag_counts = {}
+    for p in posts:
+        for word in p["content"].split():
+            if word.startswith("#") and len(word) > 1:
+                hashtag_counts[word] = hashtag_counts.get(word, 0) + 1
+    sorted_tags = sorted(hashtag_counts.items(), key=lambda x: x[1], reverse=True)
+    return render_template("trending.html", trending=sorted_tags[:20])
 
 @app.route("/post/<int:post_id>", methods=["GET", "POST"])
 def post_detail(post_id):
@@ -862,14 +1017,18 @@ def post_detail(post_id):
 def create_post():
     content = request.form.get("content", "").strip()
     is_stance = 1 if request.form.get("is_stance") else 0
+    status = request.form.get("status", "published")
+    scheduled_for = request.form.get("scheduled_for") if status == "scheduled" else None
+    
     uploaded_files = request.files.getlist("files")
     saved_filenames = []
     
     for file in uploaded_files[:20]:
         if file and file.filename and allowed_file(file.filename):
-            filename = f"{uuid.uuid4().hex}_{secure_filename(file.filename)}"
-            file.save(os.path.join(app.config["UPLOAD_FOLDER"], filename))
-            saved_filenames.append(filename)
+            filename = f"{uuid.uuid4().hex}.webp"
+            filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+            if optimize_image(file, filepath):
+                saved_filenames.append(filename)
             
     filenames_str = ",".join(saved_filenames) if saved_filenames else None
     
@@ -877,8 +1036,21 @@ def create_post():
         flash("Posts cannot be empty.")
         return redirect(url_for("index"))
         
+    og_title, og_description, og_image = None, None, None
+    for word in content.split():
+        if word.startswith("http://") or word.startswith("https://"):
+            og_data = fetch_og_data(word)
+            if og_data:
+                og_title = og_data["title"]
+                og_description = og_data["description"]
+                og_image = og_data["image"]
+            break
+
     db = get_db()
-    db.execute("INSERT INTO posts (user_id, content, image_filenames, is_stance) VALUES (?, ?, ?, ?)", (session["user_id"], content, filenames_str, is_stance))
+    db.execute(
+        "INSERT INTO posts (user_id, content, image_filenames, is_stance, status, scheduled_for, og_title, og_description, og_image) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (session["user_id"], content, filenames_str, is_stance, status, scheduled_for, og_title, og_description, og_image)
+    )
     db.commit()
     return redirect(url_for("index"))
 
@@ -887,12 +1059,13 @@ def create_post():
 def create_story():
     file = request.files.get("file")
     if file and file.filename and allowed_file(file.filename):
-        filename = f"story_{uuid.uuid4().hex}_{secure_filename(file.filename)}"
-        file.save(os.path.join(app.config["UPLOAD_FOLDER"], filename))
-        db = get_db()
-        db.execute("INSERT INTO stories (user_id, image_filename) VALUES (?, ?)", (session["user_id"], filename))
-        db.commit()
-        flash("24-hour drop uploaded successfully!")
+        filename = f"story_{uuid.uuid4().hex}.webp"
+        filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+        if optimize_image(file, filepath):
+            db = get_db()
+            db.execute("INSERT INTO stories (user_id, image_filename) VALUES (?, ?)", (session["user_id"], filename))
+            db.commit()
+            flash("24-hour drop uploaded successfully!")
     else:
         flash("Invalid image file for story.")
     return redirect(url_for("index"))
@@ -958,6 +1131,16 @@ def _react(post_id, kind, reason=""):
 def resonate_post(post_id):
     _react(post_id, "resonate")
     return redirect(request.referrer or url_for("index"))
+
+@app.route("/post/<int:post_id>/resonates")
+def post_resonates(post_id):
+    db = get_db()
+    users = db.execute("""
+        SELECT users.username FROM users 
+        JOIN reactions ON users.id = reactions.user_id 
+        WHERE reactions.post_id = ? AND reactions.kind = 'resonate'
+    """, (post_id,)).fetchall()
+    return jsonify([u['username'] for u in users])
 
 @app.route("/post/<int:post_id>/break", methods=["POST"])
 @login_required
@@ -1025,8 +1208,60 @@ def profile(username):
     if not profile_user:
         flash("User not found.")
         return redirect(url_for("index"))
+    
+    is_following = False
+    if "user_id" in session:
+        f_row = db.execute("SELECT 1 FROM follows WHERE follower_id = ? AND followed_id = ?", (session["user_id"], profile_user["id"])).fetchone()
+        if f_row:
+            is_following = True
+
     rows = db.execute(f"{POST_SELECT} WHERE posts.user_id = ? ORDER BY posts.created_at DESC", (profile_user["id"],)).fetchall()
-    return render_template("profile.html", profile_user=profile_user, posts=hydrate(rows))
+    return render_template("profile.html", profile_user=profile_user, posts=hydrate(rows), is_following=is_following)
+
+@app.route("/profile/follow/<int:user_id>", methods=["POST"])
+@login_required
+def toggle_follow(user_id):
+    if user_id == session["user_id"]:
+        return redirect(url_for("index"))
+    db = get_db()
+    existing = db.execute("SELECT * FROM follows WHERE follower_id = ? AND followed_id = ?", (session["user_id"], user_id)).fetchone()
+    target = db.execute("SELECT username FROM users WHERE id = ?", (user_id,)).fetchone()
+    if existing:
+        db.execute("DELETE FROM follows WHERE id = ?", (existing["id"],))
+        db.commit()
+        flash(f"Unfollowed @{target['username'] if target else ''}.")
+    else:
+        db.execute("INSERT INTO follows (follower_id, followed_id) VALUES (?, ?)", (session["user_id"], user_id))
+        db.commit()
+        flash(f"Now following @{target['username'] if target else ''}.")
+    return redirect(request.referrer or url_for("index"))
+
+@app.route("/profile/<username>/export-pdf")
+def export_pdf(username):
+    db = get_db()
+    profile_user = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    if not profile_user:
+        abort(404)
+    
+    posts = db.execute("SELECT content, created_at FROM posts WHERE user_id = ? ORDER BY created_at DESC", (profile_user["id"],)).fetchall()
+    
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    styles = getSampleStyleSheet()
+    story = []
+    
+    story.append(Paragraph(f"Activity Report: @{profile_user['username']}", styles['Title']))
+    story.append(Spacer(1, 12))
+    story.append(Paragraph(f"Joined: {profile_user['created_at']} | Bio: {profile_user['bio'] or 'None'}", styles['Normal']))
+    story.append(Spacer(1, 18))
+    
+    for p in posts:
+        story.append(Paragraph(f"<b>[{p['created_at']}]</b> {p['content']}", styles['Normal']))
+        story.append(Spacer(1, 8))
+        
+    doc.build(story)
+    buffer.seek(0)
+    return send_file(buffer, as_attachment=True, download_name=f"{username}_pulse_report.pdf", mimetype='application/pdf')
 
 @app.route("/profile/block/<int:user_id>", methods=["POST"])
 @login_required
@@ -1045,12 +1280,13 @@ def block_user(user_id):
 def update_avatar():
     file = request.files.get("avatar")
     if file and file.filename and allowed_file(file.filename):
-        filename = f"avatar_{uuid.uuid4().hex}_{secure_filename(file.filename)}"
-        file.save(os.path.join(app.config["UPLOAD_FOLDER"], filename))
-        db = get_db()
-        db.execute("UPDATE users SET avatar = ? WHERE id = ?", (filename, session["user_id"]))
-        db.commit()
-        flash("Profile picture updated successfully!")
+        filename = f"avatar_{uuid.uuid4().hex}.webp"
+        filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+        if optimize_image(file, filepath, max_size=(400, 400)):
+            db = get_db()
+            db.execute("UPDATE users SET avatar = ? WHERE id = ?", (filename, session["user_id"]))
+            db.commit()
+            flash("Profile picture updated successfully!")
     else:
         flash("Invalid image for profile picture.")
     return redirect(url_for("profile", username=session["username"]))
@@ -1094,6 +1330,8 @@ def delete_account():
     db.execute("DELETE FROM stories WHERE user_id = ?", (uid,))
     db.execute("DELETE FROM messages WHERE sender_id = ? OR recipient_id = ?", (uid, uid))
     db.execute("DELETE FROM blocks WHERE user_id = ? OR blocked_id = ?", (uid, uid))
+    db.execute("DELETE FROM follows WHERE follower_id = ? OR followed_id = ?", (uid, uid))
+    db.execute("DELETE FROM notifications WHERE user_id = ?", (uid,))
     db.execute("DELETE FROM users WHERE id = ?", (uid,))
     db.commit()
     session.clear()
@@ -1107,13 +1345,38 @@ def messages():
     users = db.execute("SELECT * FROM users WHERE id != ? AND username != ? AND id NOT IN (SELECT blocked_id FROM blocks WHERE user_id = ?)", (session["user_id"], SYSTEM_USERNAME, session["user_id"])).fetchall()
     return render_template("messages.html", users=users)
 
-_typing_status = {}
-
-@app.route("/chat/<int:recipient_id>/typing", methods=["POST"])
+@app.route("/notifications")
 @login_required
-def chat_typing(recipient_id):
-    _typing_status[(session["user_id"], recipient_id)] = time()
-    return "", 204
+def notifications():
+    db = get_db()
+    notifs = db.execute("SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC", (session["user_id"],)).fetchall()
+    db.execute("UPDATE notifications SET is_read = 1 WHERE user_id = ?", (session["user_id"],))
+    db.commit()
+    return render_template("notifications.html", notifications=notifs)
+
+@app.route("/notifications/json")
+def notifications_json():
+    if "user_id" not in session:
+        return jsonify([])
+    db = get_db()
+    notifs = db.execute("SELECT * FROM notifications WHERE user_id = ? AND is_read = 0", (session["user_id"],)).fetchall()
+    return jsonify([dict(n) for n in notifs])
+
+@socketio.on('join_chat')
+def handle_join(data):
+    if "user_id" not in session:
+        return
+    recipient_id = data.get('recipient_id')
+    room = f"chat_{min(session['user_id'], recipient_id)}_{max(session['user_id'], recipient_id)}"
+    join_room(room)
+
+@socketio.on('typing')
+def handle_typing(data):
+    if "user_id" not in session:
+        return
+    recipient_id = data.get('recipient_id')
+    room = f"chat_{min(session['user_id'], recipient_id)}_{max(session['user_id'], recipient_id)}"
+    emit('typing_status', {'user_id': session['user_id'], 'is_typing': data.get('is_typing')}, room=room, include_self=False)
 
 @app.route("/chat/<int:recipient_id>", methods=["GET", "POST"])
 @login_required
@@ -1128,7 +1391,17 @@ def chat(recipient_id):
         if content:
             db.execute("INSERT INTO messages (sender_id, recipient_id, content) VALUES (?, ?, ?)", (session["user_id"], recipient_id, content))
             db.commit()
-        return redirect(url_for("chat", recipient_id=recipient_id))
+            
+            msg = {
+                "sender_id": session["user_id"],
+                "recipient_id": recipient_id,
+                "content": content,
+                "read": 0,
+                "timestamp": datetime.utcnow().strftime("%H:%M")
+            }
+            room = f"chat_{min(session['user_id'], recipient_id)}_{max(session['user_id'], recipient_id)}"
+            socketio.emit('new_message', msg, room=room)
+        return "", 204
     return render_template("chat.html", recipient=recipient)
 
 @app.route("/chat/<int:recipient_id>/json")
@@ -1137,17 +1410,12 @@ def chat_json(recipient_id):
     db = get_db()
     db.execute("UPDATE messages SET read = 1 WHERE sender_id = ? AND recipient_id = ?", (recipient_id, session["user_id"]))
     db.commit()
-    rows = db.execute("SELECT sender_id, recipient_id, content, read, timestamp FROM messages WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?) ORDER BY id ASC", (session["user_id"], recipient_id, recipient_id, session["user_id"])).fetchall()
-    
-    last_typed = _typing_status.get((recipient_id, session["user_id"]), 0)
-    is_typing = (time() - last_typed) < 3.5
+    rows = db.execute("SELECT sender_id, recipient_id, content, read, strftime('%H:%M', timestamp) as timestamp FROM messages WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?) ORDER BY id ASC", (session["user_id"], recipient_id, recipient_id, session["user_id"])).fetchall()
 
     return jsonify({
-        "messages": [dict(r) for r in rows],
-        "is_typing": is_typing
+        "messages": [dict(r) for r in rows]
     })
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5001))
-    app.run(host="0.0.0.0", port=port, debug=os.environ.get("PULSE_DEBUG", "1") == "1")
-
+    socketio.run(app, host="0.0.0.0", port=port, debug=os.environ.get("PULSE_DEBUG", "1") == "1")
