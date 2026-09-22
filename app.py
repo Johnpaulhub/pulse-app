@@ -367,7 +367,6 @@ async function loadMorePosts() {
         }
         const container = document.getElementById('posts-container');
         for (const post of data.posts) {
-            // Render post card fragment dynamically via client template rendering or simple HTML injection
             const div = document.createElement('div');
             div.innerHTML = post.html_card;
             container.appendChild(div.firstElementChild);
@@ -786,7 +785,7 @@ async function sendMsg(e) {
     const val = input.value.trim();
     if (!val) return;
     
-    const res = await fetch('/chat/' + recipientId, {
+    await fetch('/chat/' + recipientId, {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: 'csrf={{ csrf_token }}&content=' + encodeURIComponent(val)
@@ -1678,3 +1677,6 @@ def chat_json(recipient_id):
     return jsonify({
         "messages": [dict(r) for r in rows]
     })
+
+if __name__ == "__main__":
+    socketio.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
