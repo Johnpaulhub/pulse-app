@@ -958,6 +958,15 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users (id)
         );
+        
+        -- Indexes for blazing fast loading
+        CREATE INDEX IF NOT EXISTS idx_posts_user_created ON posts(user_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_reactions_post ON reactions(post_id, kind);
+        CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id);
+        CREATE INDEX IF NOT EXISTS idx_polls_post ON polls(post_id);
+        CREATE INDEX IF NOT EXISTS idx_follows_follower ON follows(follower_id);
+        CREATE INDEX IF NOT EXISTS idx_blocks_user ON blocks(user_id);
     """)
     for col, spec in [
         ("is_stance", "INTEGER DEFAULT 0"),
@@ -1038,14 +1047,18 @@ def fetch_og_data(url):
 
 def hydrate(rows):
     db = get_db()
-    posts = []
+    post_dicts = [dict(row) for row in rows]
+    if not post_dicts:
+        return []
     
-    quote_ids = [dict(row).get("quote_of_id") for row in rows if dict(row).get("quote_of_id")]
-    post_ids = [dict(row).get("id") for row in rows]
+    quote_ids = [p["quote_of_id"] for p in post_dicts if p.get("quote_of_id")]
+    post_ids = [p["id"] for p in post_dicts]
     quoted_posts_map = {}
     polls_map = {}
 
+    # Optimized batch retrieval for quoted posts
     if quote_ids:
+        placeholders = ','.join('?' * len(quote_ids))
         q_sql = f"""
             SELECT posts.*, users.username, users.avatar,
                    (SELECT COUNT(*) FROM reactions WHERE reactions.post_id = posts.id AND kind = 'resonate') AS resonates,
@@ -1053,17 +1066,22 @@ def hydrate(rows):
                    (SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id) AS comments_count
             FROM posts
             JOIN users ON posts.user_id = users.id
-            WHERE posts.id IN ({','.join('?' * len(quote_ids))})
+            WHERE posts.id IN ({placeholders})
         """
         q_rows = db.execute(q_sql, quote_ids).fetchall()
-        quoted_posts_map = {p["id"]: dict(p) for p in q_rows}
+        for p in q_rows:
+            q_dict = dict(p)
+            q_dict["formatted_content"] = format_pulse(q_dict["content"])
+            quoted_posts_map[q_dict["id"]] = q_dict
 
+    # Optimized batch retrieval for polls
     if post_ids:
+        placeholders = ','.join('?' * len(post_ids))
         p_sql = f"""
             SELECT polls.id as poll_id, polls.post_id, poll_options.id as option_id, poll_options.text, poll_options.votes
             FROM polls
             JOIN poll_options ON polls.id = poll_options.poll_id
-            WHERE polls.post_id IN ({','.join('?' * len(post_ids))})
+            WHERE polls.post_id IN ({placeholders})
         """
         poll_rows = db.execute(p_sql, post_ids).fetchall()
         temp_polls = defaultdict(lambda: {"id": None, "options": []})
@@ -1072,20 +1090,18 @@ def hydrate(rows):
             temp_polls[pr["post_id"]]["options"].append({"id": pr["option_id"], "text": pr["text"], "votes": pr["votes"]})
         polls_map = dict(temp_polls)
 
-    for row in rows:
-        post = dict(row)
+    # In-memory assembly loop
+    for post in post_dicts:
         post["formatted_content"] = format_pulse(post["content"])
         post["score"] = pulse_score(post.get("resonates"), post.get("comments_count"), post.get("breaks"))
         
         if post.get("quote_of_id") in quoted_posts_map:
             post["quoted_post"] = quoted_posts_map[post["quote_of_id"]]
-            post["quoted_post"]["formatted_content"] = format_pulse(post["quoted_post"]["content"])
 
         if post["id"] in polls_map:
             post["poll"] = polls_map[post["id"]]
             
-        posts.append(post)
-    return posts
+    return post_dicts
 
 @app.context_processor
 def inject_csrf():
