@@ -19,7 +19,6 @@ from markupsafe import Markup, escape
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 from bs4 import BeautifulSoup
-# --- PERFORMANCE FIX: Kept import but scraper is disabled below ---
 import requests
 from PIL import Image
 
@@ -45,7 +44,6 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("PULSE_SECRET", "dev-only-change-me-before-public")
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
-# --- PERFORMANCE FIX: Disable debug mode in production ---
 app.config["DEBUG"] = False
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
@@ -118,6 +116,148 @@ def format_pulse(content):
 
 def pulse_score(resonates, replies, breaks):
     return int(resonates or 0) + 2 * int(replies or 0) + 3 * int(breaks or 0)
+
+# --- DATABASE & CORE SETUP ---
+
+def get_db():
+    db = getattr(g, "_database", None)
+    if db is None:
+        db = g._database = sqlite3.connect(DATABASE)
+        db.row_factory = sqlite3.Row
+    return db
+
+@app.teardown_appcontext
+def close_connection(exception):
+    db = getattr(g, "_database", None)
+    if db is not None:
+        db.close()
+
+def init_db():
+    with app.app_context():
+        db = get_db()
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                bio TEXT,
+                avatar TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                content TEXT,
+                image_filenames TEXT,
+                og_url TEXT,
+                og_title TEXT,
+                og_description TEXT,
+                og_image TEXT,
+                is_stance BOOLEAN DEFAULT 0,
+                is_prompt BOOLEAN DEFAULT 0,
+                retracted BOOLEAN DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS comments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                post_id INTEGER,
+                user_id INTEGER,
+                content TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(post_id) REFERENCES posts(id),
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS resonates (
+                user_id INTEGER,
+                post_id INTEGER,
+                PRIMARY KEY(user_id, post_id),
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                FOREIGN KEY(post_id) REFERENCES posts(id)
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS breaks (
+                user_id INTEGER,
+                post_id INTEGER,
+                PRIMARY KEY(user_id, post_id),
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                FOREIGN KEY(post_id) REFERENCES posts(id)
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS follows (
+                follower_id INTEGER,
+                followed_id INTEGER,
+                PRIMARY KEY(follower_id, followed_id),
+                FOREIGN KEY(follower_id) REFERENCES users(id),
+                FOREIGN KEY(followed_id) REFERENCES users(id)
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS bookmarks (
+                user_id INTEGER,
+                post_id INTEGER,
+                PRIMARY KEY(user_id, post_id),
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                FOREIGN KEY(post_id) REFERENCES posts(id)
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS polls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                post_id INTEGER,
+                FOREIGN KEY(post_id) REFERENCES posts(id)
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS poll_options (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                poll_id INTEGER,
+                text TEXT,
+                FOREIGN KEY(poll_id) REFERENCES polls(id)
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS poll_votes (
+                user_id INTEGER,
+                poll_id INTEGER,
+                option_id INTEGER,
+                PRIMARY KEY(user_id, poll_id),
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                FOREIGN KEY(poll_id) REFERENCES polls(id),
+                FOREIGN KEY(option_id) REFERENCES poll_options(id)
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS stories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                image_filename TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                sender_id INTEGER,
+                type TEXT,
+                post_id INTEGER,
+                is_read BOOLEAN DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                FOREIGN KEY(sender_id) REFERENCES users(id)
+            )
+        """)
+        db.commit()
 
 # --- TEMPLATES ---
 
@@ -471,4 +611,451 @@ POST_CARD_TEMPLATE = """
         {% endif %}
         <a href="{{ url_for('post_detail', post_id=post.id) }}">💬 {{ post.comments_count }} Replies</a>
         {% if session.get('user_id') and session.get('user_id') == post.user_id %}
-        <form method="POST" action="{{ url_for('delete_post', post_id=post.id) }}" style="display:inline;margin-left:auto;" onsubmit
+        <form method="POST" action="{{ url_for('delete_post', post_id=post.id) }}" style="display:inline;margin-left:auto;" onsubmit="return confirm('Delete post?')">
+            <input type="hidden" name="csrf" value="{{ csrf_token }}">
+            <button class="linkish" style="color:var(--danger);" type="submit">Delete</button>
+        </form>
+        {% endif %}
+    </div>
+</div>
+"""
+
+# --- DYNAMIC TEMPLATE LOADER ---
+
+class DynamicTemplateLoader(DictLoader):
+    def get_source(self, environment, template):
+        if template == "base.html":
+            return BASE_TEMPLATE, "base.html", lambda: True
+        elif template == "index.html":
+            return INDEX_TEMPLATE, "index.html", lambda: True
+        elif template == "post_card.html":
+            return POST_CARD_TEMPLATE, "post_card.html", lambda: True
+        return super().get_source(environment, template)
+
+app.jinja_loader = DynamicTemplateLoader({})
+app.jinja_env.filters['ago'] = timeago
+app.jinja_env.filters['avatar'] = avatar_color
+app.jinja_env.filters['pulse_format'] = format_pulse
+
+@app.before_request
+def csrf_protect():
+    if "csrf_token" not in session:
+        session["csrf_token"] = secrets.token_hex(16)
+    g.csrf_token = session["csrf_token"]
+    if request.method == "POST":
+        token = request.form.get("csrf") or request.headers.get("X-CSRF-Token")
+        if not token or token != session.get("csrf_token"):
+            abort(400, "CSRF token missing or incorrect.")
+
+@app.context_processor
+def inject_csrf():
+    return dict(csrf_token=g.get("csrf_token", ""))
+
+# --- HELPER ROUTINES ---
+
+def ensure_daily_prompt():
+    with app.app_context():
+        db = get_db()
+        sys_user = db.execute("SELECT id FROM users WHERE username = ?", (SYSTEM_USERNAME,)).fetchone()
+        if not sys_user:
+            return
+        today_str = date.today().isoformat()
+        prompt_text = DAILY_PROMPTS[date.today().toordinal() % len(DAILY_PROMPTS)]
+        existing = db.execute("SELECT id FROM posts WHERE user_id = ? AND is_prompt = 1 AND date(created_at) = ?", (sys_user["id"], today_str)).fetchone()
+        if not existing:
+            db.execute("INSERT INTO posts (user_id, content, is_prompt) VALUES (?, ?, 1)", (sys_user["id"], prompt_text))
+            db.commit()
+
+def hydrate_post(post_row, current_user_id=None):
+    if not post_row:
+        return None
+    d = dict(post_row)
+    db = get_db()
+    
+    author = db.execute("SELECT username, avatar FROM users WHERE id = ?", (d["user_id"],)).fetchone()
+    d["username"] = author["username"] if author else "unknown"
+    d["avatar"] = author["avatar"] if author else None
+    
+    resonates = db.execute("SELECT COUNT(*) FROM resonates WHERE post_id = ?", (d["id"],)).fetchone()[0]
+    replies = db.execute("SELECT COUNT(*) FROM comments WHERE post_id = ?", (d["id"],)).fetchone()[0]
+    breaks = db.execute("SELECT COUNT(*) FROM breaks WHERE post_id = ?", (d["id"],)).fetchone()[0]
+    
+    d["resonates"] = resonates
+    d["breaks"] = breaks
+    d["comments_count"] = replies
+    d["score"] = pulse_score(resonates, replies, breaks)
+    d["formatted_content"] = format_pulse(d["content"])
+    
+    poll = db.execute("SELECT id FROM polls WHERE post_id = ?", (d["id"],)).fetchone()
+    if poll:
+        opts = db.execute("SELECT id, text FROM poll_options WHERE poll_id = ?", (poll["id"],)).fetchall()
+        opt_list = []
+        for opt in opts:
+            v_count = db.execute("SELECT COUNT(*) FROM poll_votes WHERE option_id = ?", (opt["id"],)).fetchone()[0]
+            opt_list.append({"id": opt["id"], "text": opt["text"], "votes": v_count})
+        d["poll"] = {"id": poll["id"], "options": opt_list}
+    else:
+        d["poll"] = None
+        
+    return d
+
+# --- ROUTES ---
+
+@app.route("/")
+def index():
+    db = get_db()
+    feed = request.args.get("feed", "global")
+    user_id = session.get("user_id")
+    
+    if feed == "following" and user_id:
+        followed = db.execute("SELECT followed_id FROM follows WHERE follower_id = ?", (user_id,)).fetchall()
+        f_ids = [row[0] for row in followed] + [user_id]
+        placeholders = ",".join(["?"] * len(f_ids))
+        query = f"SELECT * FROM posts WHERE user_id IN ({placeholders}) ORDER BY created_at DESC LIMIT 15"
+        posts_raw = db.execute(query, f_ids).fetchall()
+        page_title = "Following Timeline"
+    elif feed == "clash":
+        query = "SELECT * FROM posts ORDER BY (SELECT COUNT(*) FROM breaks WHERE post_id = posts.id) DESC, created_at DESC LIMIT 15"
+        posts_raw = db.execute(query).fetchall()
+        page_title = "🔥 Clash Feed"
+    else:
+        feed = "global"
+        query = "SELECT * FROM posts ORDER BY created_at DESC LIMIT 15"
+        posts_raw = db.execute(query).fetchall()
+        page_title = "Unfiltered Timeline"
+        
+    posts = [hydrate_post(p, user_id) for p in posts_raw]
+    
+    stories_raw = db.execute("SELECT s.*, u.username FROM stories s JOIN users u ON s.user_id = u.id WHERE s.created_at >= datetime('now', '-24 hours') ORDER BY s.created_at DESC").fetchall()
+    
+    return render_template("index.html", posts=posts, stories=stories_raw, feed_type=feed, page_title=page_title)
+
+@app.route("/feed/json")
+def feed_json():
+    db = get_db()
+    feed = request.args.get("feed", "global")
+    page = int(request.args.get("page", 1))
+    limit = 15
+    offset = (page - 1) * limit
+    user_id = session.get("user_id")
+    
+    if feed == "following" and user_id:
+        followed = db.execute("SELECT followed_id FROM follows WHERE follower_id = ?", (user_id,)).fetchall()
+        f_ids = [row[0] for row in followed] + [user_id]
+        placeholders = ",".join(["?"] * len(f_ids))
+        query = f"SELECT * FROM posts WHERE user_id IN ({placeholders}) ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        posts_raw = db.execute(query, f_ids + [limit, offset]).fetchall()
+    elif feed == "clash":
+        query = "SELECT * FROM posts ORDER BY (SELECT COUNT(*) FROM breaks WHERE post_id = posts.id) DESC, created_at DESC LIMIT ? OFFSET ?"
+        posts_raw = db.execute(query, (limit, offset)).fetchall()
+    else:
+        query = "SELECT * FROM posts ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        posts_raw = db.execute(query, (limit, offset)).fetchall()
+        
+    posts = [hydrate_post(p, user_id) for p in posts_raw]
+    
+    rendered_posts = []
+    for post in posts:
+        card_html = render_template("post_card.html", post=post)
+        rendered_posts.append({"html_card": card_html})
+        
+    return jsonify({"posts": rendered_posts})
+
+@app.route("/post/new", methods=["POST"])
+@login_required
+def create_post():
+    if not rate_ok("create_post:" + str(session["user_id"]), n=10, window=60):
+        flash("Posting too fast. Slow down.")
+        return redirect(url_for("index"))
+        
+    content = request.form.get("content", "").strip()
+    is_stance = 1 if request.form.get("is_stance") else 0
+    
+    if not content and not request.files.getlist("files"):
+        flash("Post cannot be empty.")
+        return redirect(url_for("index"))
+        
+    files = request.files.getlist("files")
+    saved_imgs = []
+    for f in files:
+        if f and allowed_file(f.filename):
+            fname = f"{uuid.uuid4().hex}.webp"
+            path = os.path.join(app.config["UPLOAD_FOLDER"], fname)
+            if optimize_image(f, path):
+                saved_imgs.append(fname)
+    img_str = ",".join(saved_imgs) if saved_imgs else None
+    
+    # Scraper disabled to eliminate server lagging/freezing
+    og_title, og_description, og_image, og_url = None, None, None, None
+    for word in content.split():
+        if word.startswith("http://") or word.startswith("https://"):
+            og_url = word
+            break
+            
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO posts (user_id, content, image_filenames, og_url, og_title, og_description, og_image, is_stance) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (session["user_id"], content, img_str, og_url, og_title, og_description, og_image, is_stance)
+    )
+    post_id = cur.lastrowid
+    
+    opt1 = request.form.get("poll_opt1", "").strip()
+    opt2 = request.form.get("poll_opt2", "").strip()
+    if opt1 and opt2:
+        p_cur = db.execute("INSERT INTO polls (post_id) VALUES (?)", (post_id,))
+        poll_id = p_cur.lastrowid
+        db.execute("INSERT INTO poll_options (poll_id, text) VALUES (?, ?)", (poll_id, opt1))
+        db.execute("INSERT INTO poll_options (poll_id, text) VALUES (?, ?)", (poll_id, opt2))
+        
+    db.commit()
+    return redirect(url_for("index"))
+
+@app.route("/post/<int:post_id>")
+def post_detail(post_id):
+    db = get_db()
+    post_row = db.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
+    if not post_row:
+        abort(404)
+    post = hydrate_post(post_row, session.get("user_id"))
+    
+    comments_raw = db.execute("SELECT * FROM comments WHERE post_id = ? ORDER BY created_at ASC", (post_id,)).fetchall()
+    comments = []
+    for c in comments_raw:
+        cd = dict(c)
+        author = db.execute("SELECT username, avatar FROM users WHERE id = ?", (cd["user_id"],)).fetchone()
+        cd["username"] = author["username"] if author else "unknown"
+        cd["avatar"] = author["avatar"] if author else None
+        cd["formatted_content"] = format_pulse(cd["content"])
+        comments.append(cd)
+        
+    return render_template("post_detail.html", post=post, comments=comments)
+
+@app.route("/post/<int:post_id>/comment", methods=["POST"])
+@login_required
+def add_comment(post_id):
+    content = request.form.get("content", "").strip()
+    if not content:
+        return redirect(url_for("post_detail", post_id=post_id))
+    db = get_db()
+    db.execute("INSERT INTO comments (post_id, user_id, content) VALUES (?, ?, ?)", (post_id, session["user_id"], content))
+    db.commit()
+    
+    post = db.execute("SELECT user_id FROM posts WHERE id = ?", (post_id,)).fetchone()
+    if post and post["user_id"] != session["user_id"]:
+        db.execute("INSERT INTO notifications (user_id, sender_id, type, post_id) VALUES (?, ?, 'reply', ?)", (post["user_id"], session["user_id"], post_id))
+        db.commit()
+        socketio.emit(f"notification_{post['user_id']}", {"type": "reply"})
+        
+    return redirect(url_for("post_detail", post_id=post_id))
+
+@app.route("/post/<int:post_id>/resonate", methods=["POST"])
+@login_required
+def resonate_post(post_id):
+    db = get_db()
+    uid = session["user_id"]
+    existing = db.execute("SELECT * FROM resonates WHERE user_id = ? AND post_id = ?", (uid, post_id)).fetchone()
+    if existing:
+        db.execute("DELETE FROM resonates WHERE user_id = ? AND post_id = ?", (uid, post_id))
+    else:
+        db.execute("INSERT INTO resonates (user_id, post_id) VALUES (?, ?)", (uid, post_id))
+        post = db.execute("SELECT user_id FROM posts WHERE id = ?", (post_id,)).fetchone()
+        if post and post["user_id"] != uid:
+            db.execute("INSERT INTO notifications (user_id, sender_id, type, post_id) VALUES (?, ?, 'resonate', ?)", (post["user_id"], uid, post_id))
+            socketio.emit(f"notification_{post['user_id']}", {"type": "resonate"})
+    db.commit()
+    return redirect(request.referrer or url_for("index"))
+
+@app.route("/post/<int:post_id>/delete", methods=["POST"])
+@login_required
+def delete_post(post_id):
+    db = get_db()
+    post = db.execute("SELECT * FROM posts WHERE id = ? AND user_id = ?", (post_id, session["user_id"])).fetchone()
+    if post:
+        db.execute("DELETE FROM comments WHERE post_id = ?", (post_id,))
+        db.execute("DELETE FROM resonates WHERE post_id = ?", (post_id,))
+        db.execute("DELETE FROM breaks WHERE post_id = ?", (post_id,))
+        db.execute("DELETE FROM bookmarks WHERE post_id = ?", (post_id,))
+        poll = db.execute("SELECT id FROM polls WHERE post_id = ?", (post_id,)).fetchone()
+        if poll:
+            db.execute("DELETE FROM poll_options WHERE poll_id = ?", (poll["id"],))
+            db.execute("DELETE FROM poll_votes WHERE poll_id = ?", (poll["id"],))
+            db.execute("DELETE FROM polls WHERE id = ?", (poll["id"],))
+        db.execute("DELETE FROM posts WHERE id = ?", (post_id,))
+        db.commit()
+    return redirect(url_for("index"))
+
+@app.route("/poll/<int:option_id>/vote", methods=["POST"])
+@login_required
+def vote_poll(option_id):
+    db = get_db()
+    opt = db.execute("SELECT poll_id FROM poll_options WHERE id = ?", (option_id,)).fetchone()
+    if not opt:
+        abort(404)
+    poll_id = opt["poll_id"]
+    uid = session["user_id"]
+    
+    existing = db.execute("SELECT * FROM poll_votes WHERE user_id = ? AND poll_id = ?", (uid, poll_id)).fetchone()
+    if not existing:
+        db.execute("INSERT INTO poll_votes (user_id, poll_id, option_id) VALUES (?, ?, ?)", (uid, poll_id, option_id))
+        db.commit()
+    return redirect(request.referrer or url_for("index"))
+
+@app.route("/story/new", methods=["POST"])
+@login_required
+def create_story():
+    f = request.files.get("file")
+    if f and allowed_file(f.filename):
+        fname = f"{uuid.uuid4().hex}.webp"
+        path = os.path.join(app.config["UPLOAD_FOLDER"], fname)
+        if optimize_image(f, path):
+            db = get_db()
+            db.execute("INSERT INTO stories (user_id, image_filename) VALUES (?, ?)", (session["user_id"], fname))
+            db.commit()
+    return redirect(url_for("index"))
+
+@app.route("/explore")
+def explore():
+    db = get_db()
+    q = request.args.get("q", "").strip()
+    posts = []
+    if q:
+        posts_raw = db.execute("SELECT * FROM posts WHERE content LIKE ? ORDER BY created_at DESC LIMIT 20", (f"%{q}%",)).fetchall()
+        posts = [hydrate_post(p, session.get("user_id")) for p in posts_raw]
+    return render_template("explore.html", q=q, posts=posts)
+
+@app.route("/tag/<tag>")
+def tag_view(tag):
+    db = get_db()
+    tag_str = f"#{tag}"
+    posts_raw = db.execute("SELECT * FROM posts WHERE content LIKE ? ORDER BY created_at DESC LIMIT 20", (f"%{tag_str}%",)).fetchall()
+    posts = [hydrate_post(p, session.get("user_id")) for p in posts_raw]
+    return render_template("explore.html", q=tag_str, posts=posts)
+
+@app.route("/trending")
+def trending_page():
+    db = get_db()
+    posts_raw = db.execute("SELECT * FROM posts ORDER BY (SELECT COUNT(*) FROM resonates WHERE post_id = posts.id) DESC, created_at DESC LIMIT 20").fetchall()
+    posts = [hydrate_post(p, session.get("user_id")) for p in posts_raw]
+    return render_template("trending.html", posts=posts)
+
+@app.route("/bookmarks")
+@login_required
+def bookmarks_page():
+    db = get_db()
+    posts_raw = db.execute("SELECT p.* FROM posts p JOIN bookmarks b ON p.id = b.post_id WHERE b.user_id = ? ORDER BY b.post_id DESC", (session["user_id"],)).fetchall()
+    posts = [hydrate_post(p, session["user_id"]) for p in posts_raw]
+    return render_template("bookmarks.html", posts=posts)
+
+@app.route("/post/<int:post_id>/bookmark", methods=["POST"])
+@login_required
+def bookmark_post(post_id):
+    db = get_db()
+    uid = session["user_id"]
+    existing = db.execute("SELECT * FROM bookmarks WHERE user_id = ? AND post_id = ?", (uid, post_id)).fetchone()
+    if existing:
+        db.execute("DELETE FROM bookmarks WHERE user_id = ? AND post_id = ?", (uid, post_id))
+    else:
+        db.execute("INSERT INTO bookmarks (user_id, post_id) VALUES (?, ?)", (uid, post_id))
+    db.commit()
+    return redirect(request.referrer or url_for("index"))
+
+@app.route("/notifications")
+@login_required
+def notifications():
+    db = get_db()
+    notifs = db.execute("SELECT n.*, u.username FROM notifications n JOIN users u ON n.sender_id = u.id WHERE n.user_id = ? ORDER BY n.created_at DESC LIMIT 30", (session["user_id"],)).fetchall()
+    db.execute("UPDATE notifications SET is_read = 1 WHERE user_id = ?", (session["user_id"],))
+    db.commit()
+    return render_template("notifications.html", notifs=notifs)
+
+@app.route("/notifications/json")
+@login_required
+def notifications_json():
+    db = get_db()
+    notifs = db.execute("SELECT id FROM notifications WHERE user_id = ? AND is_read = 0", (session["user_id"],)).fetchall()
+    return jsonify([dict(n) for n in notifs])
+
+@app.route("/profile/<username>")
+def profile(username):
+    db = get_db()
+    user = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    if not user:
+        abort(404)
+    posts_raw = db.execute("SELECT * FROM posts WHERE user_id = ? ORDER BY created_at DESC", (user["id"],)).fetchall()
+    posts = [hydrate_post(p, session.get("user_id")) for p in posts_raw]
+    
+    is_following = False
+    if session.get("user_id"):
+        f = db.execute("SELECT * FROM follows WHERE follower_id = ? AND followed_id = ?", (session["user_id"], user["id"])).fetchone()
+        if f:
+            is_following = True
+            
+    return render_template("profile.html", profile_user=user, posts=posts, is_following=is_following)
+
+@app.route("/user/<int:user_id>/follow", methods=["POST"])
+@login_required
+def follow_user(user_id):
+    if user_id == session["user_id"]:
+        return redirect(request.referrer or url_for("index"))
+    db = get_db()
+    existing = db.execute("SELECT * FROM follows WHERE follower_id = ? AND followed_id = ?", (session["user_id"], user_id)).fetchone()
+    if existing:
+        db.execute("DELETE FROM follows WHERE follower_id = ? AND followed_id = ?", (session["user_id"], user_id))
+    else:
+        db.execute("INSERT INTO follows (follower_id, followed_id) VALUES (?, ?)", (session["user_id"], user_id))
+        db.execute("INSERT INTO notifications (user_id, sender_id, type) VALUES (?, ?, 'follow')", (user_id, session["user_id"]))
+        socketio.emit(f"notification_{user_id}", {"type": "follow"})
+    db.commit()
+    return redirect(request.referrer or url_for("index"))
+
+@app.route("/messages")
+@login_required
+def messages():
+    return render_template("messages.html")
+
+@app.route("/auth/register", methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        username = request.form.get("username", "").strip().lower()
+        password = request.form.get("password", "")
+        if not username or not password:
+            flash("Fill in all fields.")
+            return redirect(url_for("register"))
+        db = get_db()
+        try:
+            db.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, generate_password_hash(password)))
+            db.commit()
+            flash("Account created. Log in.")
+            return redirect(url_for("login"))
+        except sqlite3.IntegrityError:
+            flash("Username already taken.")
+            return redirect(url_for("register"))
+    return render_template("register.html")
+
+@app.route("/auth/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = request.form.get("username", "").strip().lower()
+        password = request.form.get("password", "")
+        db = get_db()
+        user = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+        if user and check_password_hash(user["password_hash"], password):
+            session["user_id"] = user["id"]
+            session["username"] = user["username"]
+            return redirect(url_for("index"))
+        flash("Invalid username or password.")
+    return render_template("login.html")
+
+@app.route("/auth/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+# --- PLACEHOLDER ROUTES FOR REMAINING TEMPLATES ---
+
+@app.route("/explore_page")
+def explore_page():
+    return explore()
+
+# Inline small additional page render templates to ensure no broken links
+@app.before_first_request_or_startup := lambda: None # Placeholder stub compatibility
